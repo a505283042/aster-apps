@@ -1,0 +1,12 @@
+schema = 1
+id = "aster.xiangqi"
+[[variants]]
+target = "riscv"
+package = "dist/riscv/aster.xiangqi.ast"
+boards = ["osptek-p4-st7102"]
+screens = [[480, 480]]
+[[variants]]
+target = "xtensa"
+package = "dist/xtensa/aster.xiangqi.ast"
+boards = ["aster.esp32s3.lckfb"]
+screens = [[240, 320]]

@@ -1,0 +1,25 @@
+[app]
+id = "aster.xiangqi"
+name = "楚河 · 中国象棋"
+description = "楚河汉界，落子有声。一局中国棋，一段闲时光。"
+version = "0.2.1"
+abi = "4.3.0"
+abi_min = "4.3"
+aot = true
+optimize = "O3"
+orientation = "portrait"
+category = "game"
+initial_memory = 1048576
+max_memory = 2097152
+heap = 786432
+stack = 32768
+requires = ["display", "touch", "filesystem", "audio-effects"]
+permissions = ["kv", "fs"]
+sources = ["src/main.c", "src/xiangqi.c"]
+icon = "icon.bin"
+assets = ["audio/move.wav", "audio/capture.wav", "audio/check.wav", "audio/end.wav"]
+[sdk]
+target = "xtensa"
+
+
+
