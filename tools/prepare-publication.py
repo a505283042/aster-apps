@@ -39,7 +39,8 @@ def main():
     import setup_server, static_distribution
     from StoreServer.server import publish, Store
     channel = static_distribution.source_urls(a.repository, a.tag, a.origin)[1]
-    profiles = [('riscv','osptek-p4-st7102',[480,480]),('xtensa','aster.esp32s3.lckfb',[240,320])]
+    profiles = [('riscv','osptek-p4-st7102',[480,480]),('xtensa','aster.esp32s3.lckfb',[240,320]),
+                ('riscv','fakepod-s31',[460,460])]
     for target, board, screen in profiles:
         environment = dict(os.environ)
         if not a.skip_build:

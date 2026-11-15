@@ -5,8 +5,8 @@ id = "aster.touchtest"
 [[variants]]
 target = "riscv"
 package = "dist/riscv/aster.touchtest.ast"
-boards = ["osptek-p4-st7102"]
-screens = [[480, 480]]
+boards = ["osptek-p4-st7102", "fakepod-s31"]
+screens = [[480, 480], [460, 460]]
 
 [[variants]]
 target = "xtensa"
