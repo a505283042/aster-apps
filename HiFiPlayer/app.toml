@@ -2,7 +2,7 @@
 id = "aster.hifi"
 name = "Aster 音乐"
 description = "本地无损音乐与蓝牙接收，支持后台播放和手机播放控制。"
-version = "0.2.2"
+version = "0.3.2"
 abi = "4.5.0"
 abi_min = "4.5"
 aot = true
