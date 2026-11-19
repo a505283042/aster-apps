@@ -10,9 +10,9 @@ import subprocess
 import sys
 
 ROOT = Path(__file__).resolve().parents[1]
-ENGINE = ROOT/'sdlpal-aster'
-SDK = Path(os.environ.get('ASTER_SDK', ROOT.parent.parent/'aster-sdk'))
-sys.path.insert(0, str(SDK/'tools'))
+ENGINE = ROOT / 'sdlpal-aster'
+SDK = Path(os.environ.get('ASTER_SDK', ROOT.parent.parent / 'aster-sdk'))
+sys.path.insert(0, str(SDK / 'tools'))
 import build
 import aster_board
 
@@ -49,37 +49,56 @@ def main():
     if not args.node:
         p.error('Node.js required; set ASTER_NODE or pass --node')
     workspace = Path(os.environ.get('ASTER_WORKSPACE', ROOT))
-    out = workspace/'build'/args.target/'aster.pal'
+    out = workspace / 'build' / args.target / 'aster.pal'
     out.mkdir(parents=True, exist_ok=True)
     app = build.App(ROOT)
     app.target = aster_board.get(args.target)
     if args.target == 'xtensa':
         # A native 320x240 canvas needs 150 KiB, not the P4's 450 KiB.
         # The game owns fixed arenas; the SDK heap is only for canvas/events.
-        app.initial_memory=3670016
-        app.max_memory=4194304
-        app.heap=262144
+        app.initial_memory = 3670016
+        app.max_memory = 4194304
+        app.heap = 262144
     clang = Path(build.find_clang())
-    linker = clang.parent/('wasm-ld.exe' if os.name == 'nt' else 'wasm-ld')
-    includes = [ROOT/'port/include', SDK/'include', SDK/'lib/aster',
-                ENGINE/'esp32s3/engine_bridge', ENGINE/'esp32s3/engine_bridge/include',
-                ENGINE/'esp32s3/native_engine_shim/include', ENGINE, ENGINE/'embedded',
-                ENGINE/'sdl_compat']
-    flags = ['--target=wasm32-unknown-wasi', '-std=c11', '-Os', '-ffreestanding',
-             '-fno-strict-aliasing', '-Wno-incompatible-pointer-types']
-    flags += ['-D'+d for d in DEFINES]+['-I'+str(d) for d in includes]
-    flags.append('-DPAL_ASTER_RESIDENT_MASK='+str(sum(1<<i for i in [3,12,15,17,18]))+'u')
-    flags.append('-DPAL_ASTER_NATIVE_UI='+('0' if args.target=='xtensa' else '1'))
-    if args.target=='xtensa':flags.append('-DPAL_MAX_FRAME_PIXELS=76800')
-    sources = [ENGINE/s for s in SOURCES]
-    sources += [ROOT/'port'/s for s in ['platform.c','libc.c','debug.c','audio.c','native_ui.c','native_ui_hooks.c']]
-    sources += [SDK/'lib/aster'/s for s in ['crt.c','aster_printf.c','aster_gfx.c']]
-    objects = [out/f'{i:02d}_{s.stem}.o' for i,s in enumerate(sources)]
+    linker = clang.parent / ('wasm-ld.exe' if os.name == 'nt' else 'wasm-ld')
+    includes = [
+        ROOT / 'port/include',
+        SDK / 'include',
+        SDK / 'lib/aster',
+        ENGINE / 'esp32s3/engine_bridge',
+        ENGINE / 'esp32s3/engine_bridge/include',
+        ENGINE / 'esp32s3/native_engine_shim/include',
+        ENGINE,
+        ENGINE / 'embedded',
+        ENGINE / 'sdl_compat',
+    ]
+    flags = [
+        '--target=wasm32-unknown-wasi',
+        '-std=c11',
+        '-Os',
+        '-ffreestanding',
+        '-fno-strict-aliasing',
+        '-Wno-incompatible-pointer-types',
+    ]
+    flags += ['-D' + d for d in DEFINES] + ['-I' + str(d) for d in includes]
+    flags.append('-DPAL_ASTER_RESIDENT_MASK=' + str(sum(1 << i for i in [3, 12, 15, 17, 18])) + 'u')
+    flags.append('-DPAL_ASTER_NATIVE_UI=' + ('0' if args.target == 'xtensa' else '1'))
+    if args.target == 'xtensa':
+        flags.append('-DPAL_MAX_FRAME_PIXELS=76800')
+    sources = [ENGINE / s for s in SOURCES]
+    sources += [
+        ROOT / 'port' / s
+        for s in ['platform.c', 'libc.c', 'debug.c', 'audio.c', 'native_ui.c', 'native_ui_hooks.c']
+    ]
+    sources += [SDK / 'lib/aster' / s for s in ['crt.c', 'aster_printf.c', 'aster_gfx.c']]
+    objects = [out / f'{i:02d}_{s.stem}.o' for i, s in enumerate(sources)]
+
     def compile_one(pair):
-        s,o = pair
-        run([clang]+flags+['-c',s,'-o',o])
+        s, o = pair
+        run([clang] + flags + ['-c', s, '-o', o])
+
     with ThreadPoolExecutor(max_workers=6) as pool:
-        list(pool.map(compile_one, zip(sources,objects)))
+        list(pool.map(compile_one, zip(sources, objects)))
     exports = '''aster_app_init aster_app_start aster_app_event aster_app_stop
 aster_app_destroy aster_app_pause aster_app_resume __heap_base PAL_IsInDialog
 pal_debug_main_menu pal_debug_system_menu pal_debug_viewport pal_debug_scene
@@ -87,33 +106,56 @@ pal_async_start_unwind pal_async_start_rewind pal_async_stop_unwind
 pal_async_stop_rewind pal_async_get_state PAL_EngineMain'''.split()
     wraps = '''PAL_MKFOpenPackArchive PAL_MKFIsPackArchive PAL_MKFMapChunk
 PAL_MKFGetChunkCount PAL_MKFGetChunkSize PAL_MKFReadChunk fclose'''.split()
-    if args.target=='riscv':
+    if args.target == 'riscv':
         wraps += '''SDL_BlitSurface SDL_BlitScaled SDL_FillRect SDL_FreeSurface
 PAL_RLEBlitToSurface PAL_RLEBlitToSurfaceWithHeight PAL_RLEBlitToSurfaceWithShadow
 PAL_RLEBlitWithColorShift PAL_RLEBlitMonoColor PAL_FBPBlitToSurface
 PAL_FBPBlitChunkToSurface PAL_MakeScene'''.split()
-    raw = out/'raw.wasm'
-    run([linker,'--no-entry','--error-limit=0',f'--initial-memory={app.initial_memory}',
-         f'--max-memory={app.max_memory}','-z',f'stack-size={app.stack}',
-         '--Map='+str(out/'app.map')]+['--export='+e for e in exports]
-        +['--wrap='+w for w in wraps]+objects+['-o',raw])
+    raw = out / 'raw.wasm'
+    run(
+        [
+            linker,
+            '--no-entry',
+            '--error-limit=0',
+            f'--initial-memory={app.initial_memory}',
+            f'--max-memory={app.max_memory}',
+            '-z',
+            f'stack-size={app.stack}',
+            '--Map=' + str(out / 'app.map'),
+        ]
+        + ['--export=' + e for e in exports]
+        + ['--wrap=' + w for w in wraps]
+        + objects
+        + ['-o', raw]
+    )
     # The transform resolves its files relative to this module. Use a relative
     # script argument so Windows node.exe can also be invoked from WSL.
-    subprocess.run([args.node,'port/asyncify.mjs',os.path.relpath(out,ROOT)], cwd=ROOT, check=True)
-    wasm = out/'app.wasm'
-    manifest = out/'manifest.json'
-    manifest.write_text(json.dumps(build.make_manifest(app),ensure_ascii=False),encoding='utf8')
-    package = workspace/'dist'/args.target/'aster.pal.ast'
-    package.parent.mkdir(parents=True,exist_ok=True)
-    cmd = [sys.executable,SDK/'tools/pack_ast.py','--manifest',manifest,
-           '--wasm',wasm,'-o',package]
-    if app.icon:cmd += ['--icon',ROOT/app.icon]
+    subprocess.run(
+        [args.node, 'port/asyncify.mjs', os.path.relpath(out, ROOT)], cwd=ROOT, check=True
+    )
+    wasm = out / 'app.wasm'
+    manifest = out / 'manifest.json'
+    manifest.write_text(json.dumps(build.make_manifest(app), ensure_ascii=False), encoding='utf8')
+    package = workspace / 'dist' / args.target / 'aster.pal.ast'
+    package.parent.mkdir(parents=True, exist_ok=True)
+    cmd = [
+        sys.executable,
+        SDK / 'tools/pack_ast.py',
+        '--manifest',
+        manifest,
+        '--wasm',
+        wasm,
+        '-o',
+        package,
+    ]
+    if app.icon:
+        cmd += ['--icon', ROOT / app.icon]
     if not args.no_aot:
-        aot = out/'app.aot'
-        build.build_aot(app,wasm,aot,app.target['aot_target'])
-        cmd += ['--aot',aot,'--aot-target',aster_board.pack_key_for(app.target['aot_target'])]
+        aot = out / 'app.aot'
+        build.build_aot(app, wasm, aot, app.target['aot_target'])
+        cmd += ['--aot', aot, '--aot-target', aster_board.pack_key_for(app.target['aot_target'])]
     run(cmd)
-    run([sys.executable,SDK/'tools/verify_ast.py','--target',args.target,package])
+    run([sys.executable, SDK / 'tools/verify_ast.py', '--target', args.target, package])
     print(package)
 
 

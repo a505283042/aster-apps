@@ -3,6 +3,7 @@
 Linux host prerequisite: firmware build/host/libaster_vm.a, SDK wamrc/Binaryen.
 This is a focused stack regression; game/device tests remain separate.
 """
+
 import os
 from pathlib import Path
 import subprocess
@@ -14,16 +15,20 @@ SDK = ROOT.parents[1] / 'aster-sdk'
 FW = ROOT.parents[1] / 'aster-firmware'
 
 
-@unittest.skipUnless(os.name == 'posix' and (FW/'build/host/libaster_vm.a').is_file()
-                     and (SDK/'toolchain/wamrc').is_file()
-                     and (ROOT/'artifacts/deps/binaryen-version_133/bin/wasm-as').is_file(),
-                     'requires the Linux WAMR host library, wamrc and Binaryen')
+@unittest.skipUnless(
+    os.name == 'posix'
+    and (FW / 'build/host/libaster_vm.a').is_file()
+    and (SDK / 'toolchain/wamrc').is_file()
+    and (ROOT / 'artifacts/deps/binaryen-version_133/bin/wasm-as').is_file(),
+    'requires the Linux WAMR host library, wamrc and Binaryen',
+)
 class AuxiliaryStack(unittest.TestCase):
     def test_bss_stack_traps_but_reserved_auxiliary_region_succeeds(self):
         with tempfile.TemporaryDirectory() as directory:
             base = Path(directory)
-            source = base/'runner.c'
-            source.write_text(r'''
+            source = base / 'runner.c'
+            source.write_text(
+                r'''
 #include "wasm_export.h"
 #include "aux_stack.h"
 #include <stdio.h>
@@ -48,16 +53,38 @@ int main(int argc,char **argv){
  if(env)wasm_runtime_destroy_exec_env(env);wasm_runtime_deinstantiate(i);
  wasm_runtime_unload(m);wasm_runtime_destroy();free(b);return pass?0:7;
 }
-''', encoding='utf-8')
-            binary = base/'runner'
-            subprocess.run(['cc','-std=c11','-DWASM_ENABLE_THREAD_MGR=1',
-                '-DWASM_ENABLE_SHARED_MEMORY=1',
-                '-I'+str(FW/'modules/wamr/core/iwasm/include'),str(source),
-                '-I'+str(FW/'systems/espidf/components/aster_runtime'),
-                str(FW/'build/host/libaster_vm.a'),'-lm','-ldl','-lpthread','-o',str(binary)],check=True)
-            for name, stack, expected in [('bss',32768,'0'),('partitioned',327680,'2'),('aux',327680,'1')]:
-                wat=base/(name+'.wat');wasm=base/(name+'.wasm');aot=base/(name+'.aot')
-                wat.write_text(f'''(module
+''',
+                encoding='utf-8',
+            )
+            binary = base / 'runner'
+            subprocess.run(
+                [
+                    'cc',
+                    '-std=c11',
+                    '-DWASM_ENABLE_THREAD_MGR=1',
+                    '-DWASM_ENABLE_SHARED_MEMORY=1',
+                    '-I' + str(FW / 'modules/wamr/core/iwasm/include'),
+                    str(source),
+                    '-I' + str(FW / 'systems/espidf/components/aster_runtime'),
+                    str(FW / 'build/host/libaster_vm.a'),
+                    '-lm',
+                    '-ldl',
+                    '-lpthread',
+                    '-o',
+                    str(binary),
+                ],
+                check=True,
+            )
+            for name, stack, expected in [
+                ('bss', 32768, '0'),
+                ('partitioned', 327680, '2'),
+                ('aux', 327680, '1'),
+            ]:
+                wat = base / (name + '.wat')
+                wasm = base / (name + '.wasm')
+                aot = base / (name + '.aot')
+                wat.write_text(
+                    f'''(module
  (memory (export "memory") 8)
  (global $sp (mut i32) (i32.const 393216))
  (global $end i32 (i32.const 65536))
@@ -67,12 +94,32 @@ int main(int argc,char **argv){
  (export "__heap_base" (global $heap))
  (func (export "probe")
    (global.set $sp (i32.const {stack}))
-   (global.set $sp (i32.const 393216))))''',encoding='utf-8')
-                subprocess.run([str(ROOT/'artifacts/deps/binaryen-version_133/bin/wasm-as'),str(wat),'-o',str(wasm)],check=True)
-                subprocess.run([os.environ.get('ASTER_WAMRC',str(SDK/'toolchain/wamrc')),
-                    '--target=x86_64','--bounds-checks=1','--stack-bounds-checks=1',
-                    '-o',str(aot),str(wasm)],check=True,capture_output=True)
-                subprocess.run([str(binary),str(aot),expected],check=True,timeout=10)
+   (global.set $sp (i32.const 393216))))''',
+                    encoding='utf-8',
+                )
+                subprocess.run(
+                    [
+                        str(ROOT / 'artifacts/deps/binaryen-version_133/bin/wasm-as'),
+                        str(wat),
+                        '-o',
+                        str(wasm),
+                    ],
+                    check=True,
+                )
+                subprocess.run(
+                    [
+                        os.environ.get('ASTER_WAMRC', str(SDK / 'toolchain/wamrc')),
+                        '--target=x86_64',
+                        '--bounds-checks=1',
+                        '--stack-bounds-checks=1',
+                        '-o',
+                        str(aot),
+                        str(wasm),
+                    ],
+                    check=True,
+                    capture_output=True,
+                )
+                subprocess.run([str(binary), str(aot), expected], check=True, timeout=10)
 
 
 if __name__ == '__main__':

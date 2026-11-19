@@ -54,28 +54,30 @@
  *        1 causes the shadow to be drawn 1 pixel right and 1 pixel lower than
  *        the text.)
  */
-void drawFontHvShadow(SDL_Surface *surface, int x, int y, const char *text, Font font, Uint8 hue, Sint8 value, bool black, int shadowDist)
+void drawFontHvShadow(SDL_Surface *surface, int x, int y, const char *text, Font font, Uint8 hue,
+                      Sint8 value, bool black, int shadowDist)
 {
-	drawFontDark(surface, x + shadowDist, y + shadowDist, text, font, black);
+    drawFontDark(surface, x + shadowDist, y + shadowDist, text, font, black);
 
-	drawFontHv(surface, x, y, text, font, hue, value);
+    drawFontHv(surface, x, y, text, font, hue, value);
 }
 
-void drawFontHvShadowAligned(SDL_Surface *surface, int x, int y, const char *text, Font font, FontAlignment alignment, Uint8 hue, Sint8 value, bool black, int shadowDist)
+void drawFontHvShadowAligned(SDL_Surface *surface, int x, int y, const char *text, Font font,
+                             FontAlignment alignment, Uint8 hue, Sint8 value, bool black,
+                             int shadowDist)
 {
-	switch (alignment)
-	{
-	case ALIGN_LEFT:
-		break;
-	case ALIGN_CENTER:
-		x -= JE_textWidth(text, font) / 2;
-		break;
-	case ALIGN_RIGHT:
-		x -= JE_textWidth(text, font);
-		break;
-	}
+    switch (alignment) {
+    case ALIGN_LEFT:
+        break;
+    case ALIGN_CENTER:
+        x -= JE_textWidth(text, font) / 2;
+        break;
+    case ALIGN_RIGHT:
+        x -= JE_textWidth(text, font);
+        break;
+    }
 
-	drawFontHvShadow(surface, x, y, text, font, hue, value, black, shadowDist);
+    drawFontHvShadow(surface, x, y, text, font, hue, value, black, shadowDist);
 }
 
 /**
@@ -103,31 +105,33 @@ void drawFontHvShadowAligned(SDL_Surface *surface, int x, int y, const char *tex
  *        in each cardinal direction.  If this shadow distance is small enough,
  *        this produces a shadow that outlines the text.)
  */
-void drawFontHvFullShadow(SDL_Surface *surface, int x, int y, const char *text, Font font, Uint8 hue, Sint8 value, bool black, int shadowDist)
+void drawFontHvFullShadow(SDL_Surface *surface, int x, int y, const char *text, Font font,
+                          Uint8 hue, Sint8 value, bool black, int shadowDist)
 {
-	drawFontDark(surface, x,              y - shadowDist, text, font, black);
-	drawFontDark(surface, x + shadowDist, y,              text, font, black);
-	drawFontDark(surface, x,              y + shadowDist, text, font, black);
-	drawFontDark(surface, x - shadowDist, y,              text, font, black);
+    drawFontDark(surface, x, y - shadowDist, text, font, black);
+    drawFontDark(surface, x + shadowDist, y, text, font, black);
+    drawFontDark(surface, x, y + shadowDist, text, font, black);
+    drawFontDark(surface, x - shadowDist, y, text, font, black);
 
-	drawFontHv(surface, x, y, text, font, hue, value);
+    drawFontHv(surface, x, y, text, font, hue, value);
 }
 
-void drawFontHvFullShadowAligned(SDL_Surface *surface, int x, int y, const char *text, Font font, FontAlignment alignment, Uint8 hue, Sint8 value, bool black, int shadowDist)
+void drawFontHvFullShadowAligned(SDL_Surface *surface, int x, int y, const char *text, Font font,
+                                 FontAlignment alignment, Uint8 hue, Sint8 value, bool black,
+                                 int shadowDist)
 {
-	switch (alignment)
-	{
-	case ALIGN_LEFT:
-		break;
-	case ALIGN_CENTER:
-		x -= JE_textWidth(text, font) / 2;
-		break;
-	case ALIGN_RIGHT:
-		x -= JE_textWidth(text, font);
-		break;
-	}
+    switch (alignment) {
+    case ALIGN_LEFT:
+        break;
+    case ALIGN_CENTER:
+        x -= JE_textWidth(text, font) / 2;
+        break;
+    case ALIGN_RIGHT:
+        x -= JE_textWidth(text, font);
+        break;
+    }
 
-	drawFontHvFullShadow(surface, x, y, text, font, hue, value, black, shadowDist);
+    drawFontHvFullShadow(surface, x, y, text, font, hue, value, black, shadowDist);
 }
 
 /**
@@ -148,56 +152,57 @@ void drawFontHvFullShadowAligned(SDL_Surface *surface, int x, int y, const char 
  * @param hue hue component of text color
  * @param value value component of text color
  */
-void drawFontHv(SDL_Surface *surface, int x, int y, const char *text, Font font, Uint8 hue, Sint8 value)
+void drawFontHv(SDL_Surface *surface, int x, int y, const char *text, Font font, Uint8 hue,
+                Sint8 value)
 {
- if(value==-10 && tyrian_zh_width(text,font)>=0)return; if(tyrian_zh_draw(surface,x,y,text,font,hue,value,0))return;
-	bool highlight = false;
+    if (value == -10 && tyrian_zh_width(text, font) >= 0)
+        return;
+    if (tyrian_zh_draw(surface, x, y, text, font, hue, value, 0))
+        return;
+    bool highlight = false;
 
-	for (; *text != '\0'; ++text)
-	{
-		int sprite_id = fontMap[(unsigned char)*text];
+    for (; *text != '\0'; ++text) {
+        int sprite_id = fontMap[(unsigned char)*text];
 
-		switch (*text)
-		{
-		case ' ':
-			x += 6;
-			break;
+        switch (*text) {
+        case ' ':
+            x += 6;
+            break;
 
-		case '~':
-			highlight = !highlight;
-			if (highlight)
-				value += 4;
-			else
-				value -= 4;
-			break;
+        case '~':
+            highlight = !highlight;
+            if (highlight)
+                value += 4;
+            else
+                value -= 4;
+            break;
 
-		default:
-			if (sprite_id != -1 && sprite_exists(font, sprite_id))
-			{
-				blit_sprite_hv(surface, x, y, font, sprite_id, hue, value);
+        default:
+            if (sprite_id != -1 && sprite_exists(font, sprite_id)) {
+                blit_sprite_hv(surface, x, y, font, sprite_id, hue, value);
 
-				x += sprite(font, sprite_id)->width + 1;
-			}
-			break;
-		}
-	}
+                x += sprite(font, sprite_id)->width + 1;
+            }
+            break;
+        }
+    }
 }
 
-void drawFontHvAligned(SDL_Surface *surface, int x, int y, const char *text, Font font, FontAlignment alignment, Uint8 hue, Sint8 value)
+void drawFontHvAligned(SDL_Surface *surface, int x, int y, const char *text, Font font,
+                       FontAlignment alignment, Uint8 hue, Sint8 value)
 {
-	switch (alignment)
-	{
-	case ALIGN_LEFT:
-		break;
-	case ALIGN_CENTER:
-		x -= JE_textWidth(text, font) / 2;
-		break;
-	case ALIGN_RIGHT:
-		x -= JE_textWidth(text, font);
-		break;
-	}
+    switch (alignment) {
+    case ALIGN_LEFT:
+        break;
+    case ALIGN_CENTER:
+        x -= JE_textWidth(text, font) / 2;
+        break;
+    case ALIGN_RIGHT:
+        x -= JE_textWidth(text, font);
+        break;
+    }
 
-	drawFontHv(surface, x, y, text, font, hue, value);
+    drawFontHv(surface, x, y, text, font, hue, value);
 }
 
 /**
@@ -216,49 +221,48 @@ void drawFontHvAligned(SDL_Surface *surface, int x, int y, const char *text, Fon
  * @param hue hue component of text color
  * @param value value component of text color
  */
-void drawFontHvBlend(SDL_Surface *surface, int x, int y, const char *text, Font font, Uint8 hue, Sint8 value)
+void drawFontHvBlend(SDL_Surface *surface, int x, int y, const char *text, Font font, Uint8 hue,
+                     Sint8 value)
 {
- if(tyrian_zh_draw(surface,x,y,text,font,hue,value,0))return;
-	for (; *text != '\0'; ++text)
-	{
-		int sprite_id = fontMap[(unsigned char)*text];
+    if (tyrian_zh_draw(surface, x, y, text, font, hue, value, 0))
+        return;
+    for (; *text != '\0'; ++text) {
+        int sprite_id = fontMap[(unsigned char)*text];
 
-		switch (*text)
-		{
-		case ' ':
-			x += 6;
-			break;
+        switch (*text) {
+        case ' ':
+            x += 6;
+            break;
 
-		case '~':
-			break;
+        case '~':
+            break;
 
-		default:
-			if (sprite_id != -1 && sprite_exists(font, sprite_id))
-			{
-				blit_sprite_hv_blend(surface, x, y, font, sprite_id, hue, value);
+        default:
+            if (sprite_id != -1 && sprite_exists(font, sprite_id)) {
+                blit_sprite_hv_blend(surface, x, y, font, sprite_id, hue, value);
 
-				x += sprite(font, sprite_id)->width + 1;
-			}
-			break;
-		}
-	}
+                x += sprite(font, sprite_id)->width + 1;
+            }
+            break;
+        }
+    }
 }
 
-void drawFontHvBlendAligned(SDL_Surface *surface, int x, int y, const char *text, Font font, FontAlignment alignment, Uint8 hue, Sint8 value)
+void drawFontHvBlendAligned(SDL_Surface *surface, int x, int y, const char *text, Font font,
+                            FontAlignment alignment, Uint8 hue, Sint8 value)
 {
-	switch (alignment)
-	{
-	case ALIGN_LEFT:
-		break;
-	case ALIGN_CENTER:
-		x -= JE_textWidth(text, font) / 2;
-		break;
-	case ALIGN_RIGHT:
-		x -= JE_textWidth(text, font);
-		break;
-	}
+    switch (alignment) {
+    case ALIGN_LEFT:
+        break;
+    case ALIGN_CENTER:
+        x -= JE_textWidth(text, font) / 2;
+        break;
+    case ALIGN_RIGHT:
+        x -= JE_textWidth(text, font);
+        break;
+    }
 
-	drawFontHvBlend(surface, x, y, text, font, hue, value);
+    drawFontHvBlend(surface, x, y, text, font, hue, value);
 }
 
 /**
@@ -279,45 +283,43 @@ void drawFontHvBlendAligned(SDL_Surface *surface, int x, int y, const char *text
  */
 void drawFontDark(SDL_Surface *surface, int x, int y, const char *text, Font font, bool black)
 {
- if(tyrian_zh_draw(surface,x,y,text,font,0,0,1))return;
-	for (; *text != '\0'; ++text)
-	{
-		int sprite_id = fontMap[(unsigned char)*text];
+    if (tyrian_zh_draw(surface, x, y, text, font, 0, 0, 1))
+        return;
+    for (; *text != '\0'; ++text) {
+        int sprite_id = fontMap[(unsigned char)*text];
 
-		switch (*text)
-		{
-		case ' ':
-			x += 6;
-			break;
+        switch (*text) {
+        case ' ':
+            x += 6;
+            break;
 
-		case '~':
-			break;
+        case '~':
+            break;
 
-		default:
-			if (sprite_id != -1 && sprite_exists(font, sprite_id))
-			{
-				blit_sprite_dark(surface, x, y, font, sprite_id, black);
+        default:
+            if (sprite_id != -1 && sprite_exists(font, sprite_id)) {
+                blit_sprite_dark(surface, x, y, font, sprite_id, black);
 
-				x += sprite(font, sprite_id)->width + 1;
-			}
-			break;
-		}
-	}
+                x += sprite(font, sprite_id)->width + 1;
+            }
+            break;
+        }
+    }
 }
 
-void drawFontDarkAligned(SDL_Surface *surface, int x, int y, const char *text, Font font, FontAlignment alignment, bool black)
+void drawFontDarkAligned(SDL_Surface *surface, int x, int y, const char *text, Font font,
+                         FontAlignment alignment, bool black)
 {
-	switch (alignment)
-	{
-	case ALIGN_LEFT:
-		break;
-	case ALIGN_CENTER:
-		x -= JE_textWidth(text, font) / 2;
-		break;
-	case ALIGN_RIGHT:
-		x -= JE_textWidth(text, font);
-		break;
-	}
+    switch (alignment) {
+    case ALIGN_LEFT:
+        break;
+    case ALIGN_CENTER:
+        x -= JE_textWidth(text, font) / 2;
+        break;
+    case ALIGN_RIGHT:
+        x -= JE_textWidth(text, font);
+        break;
+    }
 
-	drawFontDark(surface, x, y, text, font, black);
+    drawFontDark(surface, x, y, text, font, black);
 }

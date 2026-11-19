@@ -59,7 +59,8 @@ typedef struct {
 } render_obj;
 
 // 14 bytes of match settings
-void game_state_encode_match_settings(serial *ser, match_settings *ms) {
+void game_state_encode_match_settings(serial *ser, match_settings *ms)
+{
     serial_write_int16(ser, ms->throw_range);
     serial_write_int16(ser, ms->hit_pause);
     serial_write_int16(ser, ms->block_damage);
@@ -79,7 +80,8 @@ void game_state_encode_match_settings(serial *ser, match_settings *ms) {
 }
 
 // 14 bytes of match settings
-void game_state_decode_match_settings(serial *ser, match_settings *ms) {
+void game_state_decode_match_settings(serial *ser, match_settings *ms)
+{
     ms->throw_range = serial_read_int16(ser);
     ms->hit_pause = serial_read_int16(ser);
     ms->block_damage = serial_read_int16(ser);
@@ -96,112 +98,117 @@ void game_state_decode_match_settings(serial *ser, match_settings *ms) {
     ms->fight_mode = (in >> 24) & 0x01;      // 00000001 00000000 00000000 00000000 (1)
 }
 
-void game_state_set_pilot_name(game_state *gs, int pilot_id, const char *pilot_name) {
+void game_state_set_pilot_name(game_state *gs, int pilot_id, const char *pilot_name)
+{
     str_set_c(&gs->players[pilot_id]->pilot->name, pilot_name);
 }
 
-int game_state_get_assertion_operand(const rec_assertion_operand *op, game_state *gs) {
-    if(op->is_literal) {
+int game_state_get_assertion_operand(const rec_assertion_operand *op, game_state *gs)
+{
+    if (op->is_literal) {
         return op->value.literal;
     }
 
-    const object *obj =
-        game_state_find_object(gs, game_player_get_har_obj_id(game_state_get_player(gs, op->value.attr.har_id)));
+    const object *obj = game_state_find_object(
+        gs, game_player_get_har_obj_id(game_state_get_player(gs, op->value.attr.har_id)));
     const har *har = object_get_userdata(obj);
-    switch(op->value.attr.attribute) {
-        case ATTR_X_POS:
-            return obj->pos.x;
-        case ATTR_Y_POS:
-            return obj->pos.y;
-        case ATTR_X_VEL:
-            return obj->vel.x;
-        case ATTR_Y_VEL:
-            return obj->vel.y;
-        case ATTR_STATE_ID:
-            return har->state;
-        case ATTR_ANIMATION_ID:
-            return obj->cur_animation->id;
-        case ATTR_HEALTH:
-            return har->health;
-        case ATTR_STAMINA:
-            // scale endurance by a magic number so it fits in a 16 bit integer
-            return har->endurance / 256;
-        case ATTR_OPPONENT_DISTANCE: {
-            object *obj_opp = game_state_find_object(
-                gs, game_player_get_har_obj_id(game_state_get_player(gs, abs(op->value.attr.har_id - 1))));
-            return fabsf(obj->pos.x - obj_opp->pos.x);
-            case ATTR_DIRECTION:
-                return object_get_direction(obj);
-        }
-        default:
-            break;
+    switch (op->value.attr.attribute) {
+    case ATTR_X_POS:
+        return obj->pos.x;
+    case ATTR_Y_POS:
+        return obj->pos.y;
+    case ATTR_X_VEL:
+        return obj->vel.x;
+    case ATTR_Y_VEL:
+        return obj->vel.y;
+    case ATTR_STATE_ID:
+        return har->state;
+    case ATTR_ANIMATION_ID:
+        return obj->cur_animation->id;
+    case ATTR_HEALTH:
+        return har->health;
+    case ATTR_STAMINA:
+        // scale endurance by a magic number so it fits in a 16 bit integer
+        return har->endurance / 256;
+    case ATTR_OPPONENT_DISTANCE: {
+        object *obj_opp = game_state_find_object(
+            gs,
+            game_player_get_har_obj_id(game_state_get_player(gs, abs(op->value.attr.har_id - 1))));
+        return fabsf(obj->pos.x - obj_opp->pos.x);
+    case ATTR_DIRECTION:
+        return object_get_direction(obj);
+    }
+    default:
+        break;
     }
     crash("Unknown attr in REC file test assertion");
 }
 
-bool game_state_check_assertion_is_met(rec_assertion *ass, game_state *gs) {
+bool game_state_check_assertion_is_met(rec_assertion *ass, game_state *gs)
+{
     int16_t operand1 = game_state_get_assertion_operand(&ass->operand1, gs);
     int16_t operand2 = game_state_get_assertion_operand(&ass->operand2, gs);
 
     log_debug("operand 1 %d operand 2 %d", operand1, operand2);
 
-    switch(ass->op) {
-        case OP_EQ:
-            if(operand1 != operand2) {
-                log_error("%d != %d", operand1, operand2);
-                return false;
-            }
-            break;
-        case OP_LT:
-            if(operand1 >= operand2) {
-                log_error("%d !< %d", operand1, operand2);
-                return false;
-            }
-            break;
-        case OP_GT:
-            if(operand1 <= operand2) {
-                log_error("%d !> %d", operand1, operand2);
-                return false;
-            }
-            break;
-        case OP_SET: {
-            object *obj = game_state_find_object(
-                gs, game_player_get_har_obj_id(game_state_get_player(gs, ass->operand1.value.attr.har_id)));
-            har *har = object_get_userdata(obj);
-
-            switch(ass->operand1.value.attr.attribute) {
-                case ATTR_X_POS:
-                    obj->pos.x = operand2;
-                    return true;
-                case ATTR_Y_POS:
-                    obj->pos.y = operand2;
-                    return true;
-                case ATTR_X_VEL:
-                    obj->vel.x = operand2;
-                    return true;
-                case ATTR_Y_VEL:
-                    obj->vel.y = operand2;
-                    return true;
-                case ATTR_HEALTH:
-                    har->health = operand2;
-                    return true;
-                case ATTR_STAMINA:
-                    // scale endurance by a magic number so it fits in a 16 bit integer
-                    har->endurance = min2(operand2 * 256, har->endurance_max);
-                    return true;
-                default:
-                    log_error("unsupported set");
-                    return false;
-            }
-        }
-        default:
+    switch (ass->op) {
+    case OP_EQ:
+        if (operand1 != operand2) {
+            log_error("%d != %d", operand1, operand2);
             return false;
+        }
+        break;
+    case OP_LT:
+        if (operand1 >= operand2) {
+            log_error("%d !< %d", operand1, operand2);
+            return false;
+        }
+        break;
+    case OP_GT:
+        if (operand1 <= operand2) {
+            log_error("%d !> %d", operand1, operand2);
+            return false;
+        }
+        break;
+    case OP_SET: {
+        object *obj = game_state_find_object(gs, game_player_get_har_obj_id(game_state_get_player(
+                                                     gs, ass->operand1.value.attr.har_id)));
+        har *har = object_get_userdata(obj);
+
+        switch (ass->operand1.value.attr.attribute) {
+        case ATTR_X_POS:
+            obj->pos.x = operand2;
+            return true;
+        case ATTR_Y_POS:
+            obj->pos.y = operand2;
+            return true;
+        case ATTR_X_VEL:
+            obj->vel.x = operand2;
+            return true;
+        case ATTR_Y_VEL:
+            obj->vel.y = operand2;
+            return true;
+        case ATTR_HEALTH:
+            har->health = operand2;
+            return true;
+        case ATTR_STAMINA:
+            // scale endurance by a magic number so it fits in a 16 bit integer
+            har->endurance = min2(operand2 * 256, har->endurance_max);
+            return true;
+        default:
+            log_error("unsupported set");
+            return false;
+        }
+    }
+    default:
+        return false;
     }
     return true;
 }
 
 // reset the match settings to use all the settings. This is essentially 1/2 player mode & demo mode
-void game_state_match_settings_reset(game_state *gs) {
+void game_state_match_settings_reset(game_state *gs)
+{
     gs->match_settings.throw_range = settings_get()->advanced.throw_range;
     gs->match_settings.hit_pause = settings_get()->advanced.hit_pause;
     gs->match_settings.block_damage = settings_get()->advanced.block_damage;
@@ -218,7 +225,8 @@ void game_state_match_settings_reset(game_state *gs) {
     gs->match_settings.sim = false;
 }
 
-void game_state_copy_match_settings(game_state *gs, const match_settings *ms) {
+void game_state_copy_match_settings(game_state *gs, const match_settings *ms)
+{
     log_debug("Copying settings");
     gs->match_settings.throw_range = ms->throw_range;
     gs->match_settings.hit_pause = ms->hit_pause;
@@ -236,7 +244,8 @@ void game_state_copy_match_settings(game_state *gs, const match_settings *ms) {
     gs->match_settings.sim = false;
 }
 
-void game_state_match_settings_defaults(game_state *gs) {
+void game_state_match_settings_defaults(game_state *gs)
+{
     gs->match_settings.throw_range = 100;
     gs->match_settings.hit_pause = 4;
     gs->match_settings.block_damage = 0;
@@ -253,7 +262,8 @@ void game_state_match_settings_defaults(game_state *gs) {
     gs->match_settings.sim = false;
 }
 
-int game_state_create(game_state *gs, const engine_init_flags *init_flags) {
+int game_state_create(game_state *gs, const engine_init_flags *init_flags)
+{
     gs->run = 1;
     gs->paused = 0;
     gs->tick = 0;
@@ -263,7 +273,7 @@ int game_state_create(game_state *gs, const engine_init_flags *init_flags) {
     gs->net_mode = init_flags->net_mode;
     gs->speed = settings_get()->gameplay.speed + 5;
 
-    if(init_flags->speed >= 0) {
+    if (init_flags->speed >= 0) {
         gs->speed = clamp(init_flags->speed, 1, 10) + 5;
     }
     gs->init_flags = init_flags;
@@ -296,18 +306,18 @@ int game_state_create(game_state *gs, const engine_init_flags *init_flags) {
     gs->sc = omf_calloc(1, sizeof(scene));
 
     // Set up players
-    for(int i = 0; i < 2; i++) {
+    for (int i = 0; i < 2; i++) {
         gs->players[i] = omf_calloc(1, sizeof(game_player));
         game_player_create(gs->players[i]);
     }
 
     reconfigure_controller(gs);
     int nscene;
-    if(path_is_set(&init_flags->rec_file) > 0 && init_flags->playback == 1) {
+    if (path_is_set(&init_flags->rec_file) > 0 && init_flags->playback == 1) {
         gs->rec = omf_malloc(sizeof(sd_rec_file));
         sd_rec_create(gs->rec);
         int ret = sd_rec_load(gs->rec, &init_flags->rec_file);
-        if(ret != SD_SUCCESS) {
+        if (ret != SD_SUCCESS) {
             log_error("Unable to load recording %s.", path_c(&init_flags->rec_file));
             goto error_0;
         }
@@ -317,20 +327,23 @@ int game_state_create(game_state *gs, const engine_init_flags *init_flags) {
         gs->this_id = nscene;
         gs->next_id = nscene;
 
-        if(scene_create(gs->sc, gs, nscene)) {
+        if (scene_create(gs->sc, gs, nscene)) {
             log_error("Error while loading scene %d.", nscene);
             goto error_0;
         }
 
         // set the HAR colors, pilot, har type and and pilot and HAR stats
-        for(int i = 0; i < 2; i++) {
+        for (int i = 0; i < 2; i++) {
             sd_pilot_free(gs->players[i]->pilot);
             omf_free(gs->players[i]->pilot);
             gs->players[i]->pilot = &gs->rec->pilots[i].info;
             // this function alters the palette
-            sd_pilot_set_player_color(gs->players[i]->pilot, PRIMARY, gs->rec->pilots[i].info.color_1);
-            sd_pilot_set_player_color(gs->players[i]->pilot, SECONDARY, gs->rec->pilots[i].info.color_2);
-            sd_pilot_set_player_color(gs->players[i]->pilot, TERTIARY, gs->rec->pilots[i].info.color_3);
+            sd_pilot_set_player_color(gs->players[i]->pilot, PRIMARY,
+                                      gs->rec->pilots[i].info.color_1);
+            sd_pilot_set_player_color(gs->players[i]->pilot, SECONDARY,
+                                      gs->rec->pilots[i].info.color_2);
+            sd_pilot_set_player_color(gs->players[i]->pilot, TERTIARY,
+                                      gs->rec->pilots[i].info.color_3);
         }
 
         gs->match_settings.throw_range = gs->rec->throw_range;
@@ -348,12 +361,14 @@ int game_state_create(game_state *gs, const engine_init_flags *init_flags) {
         gs->match_settings.fight_mode = gs->rec->hyper_mode;
         gs->match_settings.sim = false;
 
-        game_player_set_selectable(game_state_get_player(gs, 0), gs->rec->p1_controller != REC_CONTROLLER_AI);
-        game_player_set_selectable(game_state_get_player(gs, 1), gs->rec->p2_controller != REC_CONTROLLER_AI);
+        game_player_set_selectable(game_state_get_player(gs, 0),
+                                   gs->rec->p1_controller != REC_CONTROLLER_AI);
+        game_player_set_selectable(game_state_get_player(gs, 1),
+                                   gs->rec->p2_controller != REC_CONTROLLER_AI);
 
         _setup_rec_controller(gs, 0, gs->rec);
         _setup_rec_controller(gs, 1, gs->rec);
-        if(arena_create(gs->sc)) {
+        if (arena_create(gs->sc)) {
             log_error("Error while creating arena scene.");
             goto error_1;
         }
@@ -363,18 +378,18 @@ int game_state_create(game_state *gs, const engine_init_flags *init_flags) {
         gs->this_id = nscene;
         gs->next_id = nscene;
 
-        if(scene_create(gs->sc, gs, nscene)) {
+        if (scene_create(gs->sc, gs, nscene)) {
             log_error("Error while loading scene %d.", nscene);
             goto error_0;
         }
-        if(init_flags->net_mode == NET_MODE_NONE) {
-            if(openomf_create(gs->sc)) {
+        if (init_flags->net_mode == NET_MODE_NONE) {
+            if (openomf_create(gs->sc)) {
                 log_error("Error while creating intro scene.");
                 goto error_1;
             }
         } else {
             // if connecting to the server or listening, jump straight to the menu
-            if(mainmenu_create(gs->sc)) {
+            if (mainmenu_create(gs->sc)) {
                 log_error("Error while creating menu scene.");
                 goto error_1;
             }
@@ -405,20 +420,21 @@ error_0:
  * \param singleton Should object be the lone representative of the animation ID ?
  * \param persistent Should object keep active across scene boundaries ?
  */
-int game_state_add_object(game_state *gs, object *obj, int layer, int singleton, int persistent) {
+int game_state_add_object(game_state *gs, object *obj, int layer, int singleton, int persistent)
+{
     render_obj o;
     o.obj = obj;
     o.layer = layer;
     o.singleton = singleton;
     o.persistent = persistent;
     animation *new_ani = object_get_animation(obj);
-    if(singleton) {
+    if (singleton) {
         iterator it;
         render_obj *robj;
         vector_iter_begin(&gs->objects, &it);
-        foreach(it, robj) {
+        foreach (it, robj) {
             animation *ani = object_get_animation(robj->obj);
-            if(ani != NULL && ani->id == new_ani->id && robj->singleton) {
+            if (ani != NULL && ani->id == new_ani->id && robj->singleton) {
                 return 1;
             }
         }
@@ -435,34 +451,39 @@ int game_state_add_object(game_state *gs, object *obj, int layer, int singleton,
 /*
  * Slows down the game for n ticks. Only allows slowdown if one isn't already ongoing.
  */
-void game_state_slowdown(game_state *gs, int ticks, int rate) {
-    if(gs->speed_slowdown_time < 0) {
+void game_state_slowdown(game_state *gs, int ticks, int rate)
+{
+    if (gs->speed_slowdown_time < 0) {
         gs->speed_slowdown_previous = gs->speed;
         gs->speed_slowdown_time = ticks;
         gs->speed = max2(rate, 0);
     }
 }
 
-void game_state_hit_pause(game_state *gs) {
+void game_state_hit_pause(game_state *gs)
+{
     gs->hit_pause = gs->match_settings.hit_pause;
 }
 
-void game_state_set_speed(game_state *gs, int rate) {
+void game_state_set_speed(game_state *gs, int rate)
+{
     gs->speed = max2(rate, 0);
     log_debug("game speed set to %u", gs->speed);
 }
 
-unsigned int game_state_get_speed(game_state *gs) {
+unsigned int game_state_get_speed(game_state *gs)
+{
     return gs->speed;
 }
 
-void game_state_del_animation(game_state *gs, int anim_id) {
+void game_state_del_animation(game_state *gs, int anim_id)
+{
     iterator it;
     render_obj *robj;
     vector_iter_begin(&gs->objects, &it);
-    foreach(it, robj) {
+    foreach (it, robj) {
         animation *ani = object_get_animation(robj->obj);
-        if(ani != NULL && ani->id == anim_id) {
+        if (ani != NULL && ani->id == anim_id) {
             object_free(robj->obj);
             omf_free(robj->obj);
             vector_delete(&gs->objects, &it);
@@ -470,15 +491,18 @@ void game_state_del_animation(game_state *gs, int anim_id) {
             return;
         }
     }
-    log_debug("Attempted to delete animation %i from game_state, but no such animation was playing.", anim_id);
+    log_debug(
+        "Attempted to delete animation %i from game_state, but no such animation was playing.",
+        anim_id);
 }
 
-void game_state_del_object(game_state *gs, object *target) {
+void game_state_del_object(game_state *gs, object *target)
+{
     iterator it;
     render_obj *robj;
     vector_iter_begin(&gs->objects, &it);
-    foreach(it, robj) {
-        if(target == robj->obj) {
+    foreach (it, robj) {
+        if (target == robj->obj) {
             object_free(robj->obj);
             omf_free(robj->obj);
             vector_delete(&gs->objects, &it);
@@ -487,12 +511,13 @@ void game_state_del_object(game_state *gs, object *target) {
     }
 }
 
-void game_state_del_object_by_id(game_state *gs, uint32_t target) {
+void game_state_del_object_by_id(game_state *gs, uint32_t target)
+{
     iterator it;
     render_obj *robj;
     vector_iter_begin(&gs->objects, &it);
-    foreach(it, robj) {
-        if(target == robj->obj->id) {
+    foreach (it, robj) {
+        if (target == robj->obj->id) {
             object_free(robj->obj);
             omf_free(robj->obj);
             vector_delete(&gs->objects, &it);
@@ -501,23 +526,25 @@ void game_state_del_object_by_id(game_state *gs, uint32_t target) {
     }
 }
 
-void game_state_get_projectiles(game_state *gs, vector *obj_proj) {
+void game_state_get_projectiles(game_state *gs, vector *obj_proj)
+{
     iterator it;
     render_obj *robj;
     vector_iter_begin(&gs->objects, &it);
-    foreach(it, robj) {
-        if(object_get_layers(robj->obj) & LAYER_PROJECTILE) {
+    foreach (it, robj) {
+        if (object_get_layers(robj->obj) & LAYER_PROJECTILE) {
             vector_append(obj_proj, &robj->obj);
         }
     }
 }
 
-void game_state_clear_objects(game_state *gs, int mask) {
+void game_state_clear_objects(game_state *gs, int mask)
+{
     iterator it;
     render_obj *robj;
     vector_iter_begin(&gs->objects, &it);
-    foreach(it, robj) {
-        if(object_get_group(robj->obj) & mask) {
+    foreach (it, robj) {
+        if (object_get_group(robj->obj) & mask) {
             object_free(robj->obj);
             omf_free(robj->obj);
             vector_delete(&gs->objects, &it);
@@ -525,44 +552,51 @@ void game_state_clear_objects(game_state *gs, int mask) {
     }
 }
 
-void game_state_set_next(game_state *gs, unsigned int next_scene_id) {
-    if(gs->next_wait_ticks <= 0) {
+void game_state_set_next(game_state *gs, unsigned int next_scene_id)
+{
+    if (gs->next_wait_ticks <= 0) {
         gs->next_wait_ticks = FRAME_WAIT_TICKS;
         gs->next_next_id = SCENE_MENU;
         gs->next_id = next_scene_id;
     }
 }
 
-scene *game_state_get_scene(game_state *gs) {
+scene *game_state_get_scene(game_state *gs)
+{
     return gs->sc;
 }
 
-unsigned int game_state_is_running(game_state *gs) {
+unsigned int game_state_is_running(game_state *gs)
+{
     return gs->run;
 }
 
-unsigned int game_state_is_paused(game_state *gs) {
+unsigned int game_state_is_paused(game_state *gs)
+{
     return gs->paused;
 }
 
-void game_state_set_paused(game_state *gs, unsigned int paused) {
+void game_state_set_paused(game_state *gs, unsigned int paused)
+{
     // don't pause netplay games
-    if(is_netplay(gs)) {
+    if (is_netplay(gs)) {
         return;
     }
 
     gs->paused = paused;
 }
 
-bool game_state_handle_event(game_state *gs, SDL_Event *event) {
-    if(event->type == SDL_KEYDOWN && is_demoplay(gs) && event->key.keysym.sym == SDLK_ESCAPE) {
+bool game_state_handle_event(game_state *gs, SDL_Event *event)
+{
+    if (event->type == SDL_KEYDOWN && is_demoplay(gs) && event->key.keysym.sym == SDLK_ESCAPE) {
         // ESC during demo mode jumps you back to the main menu
         game_state_set_next(gs, SCENE_MENU);
         return true;
-    } else if(event->type == SDL_KEYDOWN && is_demoplay(gs) && event->key.keysym.sym == SDLK_RETURN) {
+    } else if (event->type == SDL_KEYDOWN && is_demoplay(gs) &&
+               event->key.keysym.sym == SDLK_RETURN) {
         // ENTER during demo mode skips menus
-        if(gs->sc->id < SCENE_ARENA0 || gs->sc->id > SCENE_ARENA4) {
-            if(gs->sc->id != SCENE_VS) {
+        if (gs->sc->id < SCENE_ARENA0 || gs->sc->id > SCENE_ARENA4) {
+            if (gs->sc->id != SCENE_VS) {
                 game_state_init_demo(gs);
             }
             game_state_set_next(gs, rand_arena());
@@ -572,14 +606,15 @@ bool game_state_handle_event(game_state *gs, SDL_Event *event) {
     return scene_event(gs->sc, event);
 }
 
-void cross_fade_transform(damage_tracker *damage, vga_palette *pal, void *userdata) {
+void cross_fade_transform(damage_tracker *damage, vga_palette *pal, void *userdata)
+{
     game_state *gs = userdata;
     int darkness = 0;
 
-    if(gs->this_wait_ticks > 0) {
+    if (gs->this_wait_ticks > 0) {
         darkness = gs->this_wait_ticks * 255 / FRAME_WAIT_TICKS;
     }
-    if(gs->next_wait_ticks > 0) {
+    if (gs->next_wait_ticks > 0) {
         darkness = 255 - gs->next_wait_ticks * 255 / FRAME_WAIT_TICKS;
     }
 
@@ -589,7 +624,8 @@ void cross_fade_transform(damage_tracker *damage, vga_palette *pal, void *userda
     damage_set_all(damage);
 }
 
-void game_state_render(game_state *gs) {
+void game_state_render(game_state *gs)
+{
     iterator it;
     render_obj *robj;
 
@@ -603,9 +639,9 @@ void game_state_render(game_state *gs) {
 
     // Render BOTTOM layer
     vector_iter_begin(&gs->objects, &it);
-    foreach(it, robj) {
-        if(robj->layer == RENDER_LAYER_BOTTOM) {
-            if(robj->obj == har[0] || robj->obj == har[1]) {
+    foreach (it, robj) {
+        if (robj->layer == RENDER_LAYER_BOTTOM) {
+            if (robj->obj == har[0] || robj->obj == har[1]) {
                 continue;
             }
             object_render(robj->obj);
@@ -614,22 +650,22 @@ void game_state_render(game_state *gs) {
 
     // cast object shadows (scrap, projectiles, etc)
     vector_iter_begin(&gs->objects, &it);
-    foreach(it, robj) {
+    foreach (it, robj) {
         object_render_shadow(robj->obj);
     }
 
     // Render passive HARs here
-    for(int i = 0; i < 2; i++) {
-        if(har[i] != NULL && !har_is_active(har[i])) {
+    for (int i = 0; i < 2; i++) {
+        if (har[i] != NULL && !har_is_active(har[i])) {
             object_render(har[i]);
         }
     }
 
     // Render MIDDLE layer
     vector_iter_begin(&gs->objects, &it);
-    foreach(it, robj) {
-        if(robj->layer == RENDER_LAYER_MIDDLE) {
-            if(robj->obj == har[0] || robj->obj == har[1]) {
+    foreach (it, robj) {
+        if (robj->layer == RENDER_LAYER_MIDDLE) {
+            if (robj->obj == har[0] || robj->obj == har[1]) {
                 continue;
             }
             object_render(robj->obj);
@@ -637,17 +673,17 @@ void game_state_render(game_state *gs) {
     }
 
     // Render active HARs here
-    for(int i = 0; i < 2; i++) {
-        if(har[i] != NULL && har_is_active(har[i])) {
+    for (int i = 0; i < 2; i++) {
+        if (har[i] != NULL && har_is_active(har[i])) {
             object_render(har[i]);
         }
     }
 
     // Render TOP layer
     vector_iter_begin(&gs->objects, &it);
-    foreach(it, robj) {
-        if(robj->layer == RENDER_LAYER_TOP) {
-            if(robj->obj == har[0] || robj->obj == har[1]) {
+    foreach (it, robj) {
+        if (robj->layer == RENDER_LAYER_TOP) {
+            if (robj->obj == har[0] || robj->obj == har[1]) {
                 continue;
             }
             object_render(robj->obj);
@@ -658,39 +694,42 @@ void game_state_render(game_state *gs) {
     scene_render_overlay(gs->sc);
 }
 
-unsigned game_state_get_framebuffer_options(game_state *gs) {
-    if(gs->this_id == SCENE_CREDITS) {
+unsigned game_state_get_framebuffer_options(game_state *gs)
+{
+    if (gs->this_id == SCENE_CREDITS) {
         return FBUFOPT_CREDITS;
     }
 
     return 0;
 }
 
-void game_state_palette_transform(game_state *gs) {
+void game_state_palette_transform(game_state *gs)
+{
     // object transforms
     render_obj *robj;
     iterator it;
     vector_iter_begin(&gs->objects, &it);
-    foreach(it, robj) {
+    foreach (it, robj) {
         object_palette_transform(robj->obj);
     }
 
     // Cross-fade effect
-    if(gs->next_wait_ticks > 0 || gs->this_wait_ticks > 0) {
+    if (gs->next_wait_ticks > 0 || gs->this_wait_ticks > 0) {
         vga_state_enable_palette_transform(cross_fade_transform, gs);
     }
 
     scene_palette_transform(gs->sc);
 }
 
-void game_state_debug(game_state *gs) {
+void game_state_debug(game_state *gs)
+{
     // If we are in debug mode, handle HAR debug layers
 #ifdef DEBUGMODE
     render_obj *robj;
     iterator it;
     vector_iter_begin(&gs->objects, &it);
-    foreach(it, robj) {
-        if(robj->obj != NULL) {
+    foreach (it, robj) {
+        if (robj->obj != NULL) {
             object_debug(robj->obj);
         }
     }
@@ -699,26 +738,44 @@ void game_state_debug(game_state *gs) {
 }
 
 static int omf_loading;
-int omf_scene_load_active(void) { return omf_loading!=0; }
-int omf_scene_load_step(game_state *gs) {
-    uint32_t began=aster_time_now_ms();int step=omf_loading,rc=0;
-    if(step==1||step==2)rc=scene_load_har(gs->sc,step-1);
-    else if(step==3) {
-        rc=arena_create(gs->sc);
-        if(!rc){scene_init(gs->sc);gs->tick=0;gs->this_wait_ticks=gs->next_wait_ticks=0;}
-    }
-    aster_printf("OMF LOAD step=%d duration_ms=%u rc=%d",step,aster_time_now_ms()-began,rc);
-    if(rc){omf_loading=0;gs->run=0;return 1;}
-    omf_loading=step==3?0:step+1;return 0;
+
+int omf_scene_load_active(void)
+{
+    return omf_loading != 0;
 }
 
-int game_state_swap_scene(game_state *gs, int scene_id) {
+int omf_scene_load_step(game_state *gs)
+{
+    uint32_t began = aster_time_now_ms();
+    int step = omf_loading, rc = 0;
+    if (step == 1 || step == 2)
+        rc = scene_load_har(gs->sc, step - 1);
+    else if (step == 3) {
+        rc = arena_create(gs->sc);
+        if (!rc) {
+            scene_init(gs->sc);
+            gs->tick = 0;
+            gs->this_wait_ticks = gs->next_wait_ticks = 0;
+        }
+    }
+    aster_printf("OMF LOAD step=%d duration_ms=%u rc=%d", step, aster_time_now_ms() - began, rc);
+    if (rc) {
+        omf_loading = 0;
+        gs->run = 0;
+        return 1;
+    }
+    omf_loading = step == 3 ? 0 : step + 1;
+    return 0;
+}
+
+int game_state_swap_scene(game_state *gs, int scene_id)
+{
     // Remove old objects
     render_obj *robj;
     iterator it;
     vector_iter_begin(&gs->objects, &it);
-    foreach(it, robj) {
-        if(!robj->persistent) {
+    foreach (it, robj) {
+        if (!robj->persistent) {
             object_free(robj->obj);
             omf_free(robj->obj);
             vector_delete(&gs->objects, &it);
@@ -732,7 +789,7 @@ int game_state_swap_scene(game_state *gs, int scene_id) {
     gs->next_id = scene_id;
 
     // Disable gameplay mods during netplay arena to prevent desyncs
-    if(scene_id >= SCENE_ARENA0 && scene_id <= SCENE_ARENA4) {
+    if (scene_id >= SCENE_ARENA0 && scene_id <= SCENE_ARENA4) {
         modmanager_set_allowed(game_state_get_player(gs, 0)->ctrl->type != CTRL_TYPE_NETWORK &&
                                game_state_get_player(gs, 1)->ctrl->type != CTRL_TYPE_NETWORK);
     } else {
@@ -741,94 +798,95 @@ int game_state_swap_scene(game_state *gs, int scene_id) {
 
     // Initialize new scene with BK data etc.
     gs->sc = omf_calloc(1, sizeof(scene));
-    if(scene_create(gs->sc, gs, scene_id)) {
+    if (scene_create(gs->sc, gs, scene_id)) {
         log_error("Error while loading scene %d.", scene_id);
         goto error_0;
     }
 
     /* Original scene creation and both original HAR loaders run on separate
      * Aster events. The engine stays frozen until all original data is ready. */
-    if(scene_id>=SCENE_ARENA0 && scene_id<=SCENE_ARENA4) {
-        omf_loading=1;return 0;
+    if (scene_id >= SCENE_ARENA0 && scene_id <= SCENE_ARENA4) {
+        omf_loading = 1;
+        return 0;
     }
     // Load scene specifics
-    switch(scene_id) {
-        case SCENE_OPENOMF:
-            if(openomf_create(gs->sc)) {
-                log_error("Error while creating openomf-intro scene.");
-                goto error_1;
-            }
-            break;
-        case SCENE_INTRO:
-            if(intro_create(gs->sc)) {
-                log_error("Error while creating intro scene.");
-                goto error_1;
-            }
-            break;
-        case SCENE_MENU:
-            if(mainmenu_create(gs->sc)) {
-                log_error("Error while creating mainmenu scene.");
-                goto error_1;
-            }
-            break;
-        case SCENE_SCOREBOARD:
-            if(scoreboard_create(gs->sc)) {
-                log_error("Error while creating scoreboard scene.");
-                goto error_1;
-            }
-            break;
-        case SCENE_CREDITS:
-            if(credits_create(gs->sc)) {
-                log_error("Error while creating credits scene.");
-                goto error_1;
-            }
-            break;
-        case SCENE_MELEE:
-            if(melee_create(gs->sc)) {
-                log_error("Error while creating melee scene.");
-                goto error_1;
-            }
-            break;
-        case SCENE_VS:
-            if(vs_create(gs->sc)) {
-                log_error("Error while creating VS scene.");
-                goto error_1;
-            }
-            break;
-        case SCENE_MECHLAB:
-            if(mechlab_create(gs->sc)) {
-                log_error("Error while creating Mechlab scene.");
-                goto error_1;
-            }
-            break;
-        case SCENE_NEWSROOM:
-            if(newsroom_create(gs->sc)) {
-                log_error("Error while creating Newsroom scene.");
-                goto error_1;
-            }
-            break;
-        case SCENE_LOBBY:
-            if(lobby_create(gs->sc)) {
-                log_error("Error creating Lobby scene.");
-                goto error_1;
-            }
-            break;
-        case SCENE_ARENA0:
-        case SCENE_ARENA1:
-        case SCENE_ARENA2:
-        case SCENE_ARENA3:
-        case SCENE_ARENA4:
-            if(arena_create(gs->sc)) {
-                log_error("Error while creating arena scene.");
-                goto error_1;
-            }
-            break;
-        default:
-            if(cutscene_create(gs->sc)) {
-                log_error("Error while creating cut scene.");
-                goto error_1;
-            }
-            break;
+    switch (scene_id) {
+    case SCENE_OPENOMF:
+        if (openomf_create(gs->sc)) {
+            log_error("Error while creating openomf-intro scene.");
+            goto error_1;
+        }
+        break;
+    case SCENE_INTRO:
+        if (intro_create(gs->sc)) {
+            log_error("Error while creating intro scene.");
+            goto error_1;
+        }
+        break;
+    case SCENE_MENU:
+        if (mainmenu_create(gs->sc)) {
+            log_error("Error while creating mainmenu scene.");
+            goto error_1;
+        }
+        break;
+    case SCENE_SCOREBOARD:
+        if (scoreboard_create(gs->sc)) {
+            log_error("Error while creating scoreboard scene.");
+            goto error_1;
+        }
+        break;
+    case SCENE_CREDITS:
+        if (credits_create(gs->sc)) {
+            log_error("Error while creating credits scene.");
+            goto error_1;
+        }
+        break;
+    case SCENE_MELEE:
+        if (melee_create(gs->sc)) {
+            log_error("Error while creating melee scene.");
+            goto error_1;
+        }
+        break;
+    case SCENE_VS:
+        if (vs_create(gs->sc)) {
+            log_error("Error while creating VS scene.");
+            goto error_1;
+        }
+        break;
+    case SCENE_MECHLAB:
+        if (mechlab_create(gs->sc)) {
+            log_error("Error while creating Mechlab scene.");
+            goto error_1;
+        }
+        break;
+    case SCENE_NEWSROOM:
+        if (newsroom_create(gs->sc)) {
+            log_error("Error while creating Newsroom scene.");
+            goto error_1;
+        }
+        break;
+    case SCENE_LOBBY:
+        if (lobby_create(gs->sc)) {
+            log_error("Error creating Lobby scene.");
+            goto error_1;
+        }
+        break;
+    case SCENE_ARENA0:
+    case SCENE_ARENA1:
+    case SCENE_ARENA2:
+    case SCENE_ARENA3:
+    case SCENE_ARENA4:
+        if (arena_create(gs->sc)) {
+            log_error("Error while creating arena scene.");
+            goto error_1;
+        }
+        break;
+    default:
+        if (cutscene_create(gs->sc)) {
+            log_error("Error while creating cut scene.");
+            goto error_1;
+        }
+        break;
     }
 
     // Zap scene to produce objects & background
@@ -845,22 +903,24 @@ error_0:
     return 1;
 }
 
-int game_load_new(game_state *gs, int scene_id) {
+int game_load_new(game_state *gs, int scene_id)
+{
     scene_free(gs->sc);
     omf_free(gs->sc);
     return game_state_swap_scene(gs, scene_id);
 }
 
-void game_state_call_collide(game_state *gs) {
+void game_state_call_collide(game_state *gs)
+{
     object *a, *b;
     unsigned int size = vector_size(&gs->objects);
-    for(unsigned i = 0; i < size; i++) {
+    for (unsigned i = 0; i < size; i++) {
         a = ((render_obj *)vector_get(&gs->objects, i))->obj;
-        for(unsigned k = i + 1; k < size; k++) {
+        for (unsigned k = i + 1; k < size; k++) {
             b = ((render_obj *)vector_get(&gs->objects, k))->obj;
-            if(a->group != b->group || a->group == GROUP_UNKNOWN || b->group == GROUP_UNKNOWN ||
-               (a->group == GROUP_HAR && b->group == GROUP_HAR)) {
-                if(a->layers & b->layers) {
+            if (a->group != b->group || a->group == GROUP_UNKNOWN || b->group == GROUP_UNKNOWN ||
+                (a->group == GROUP_HAR && b->group == GROUP_HAR)) {
+                if (a->layers & b->layers) {
                     object_collide(a, b);
                 }
             }
@@ -868,12 +928,13 @@ void game_state_call_collide(game_state *gs) {
     }
 }
 
-void game_state_cleanup(game_state *gs) {
+void game_state_cleanup(game_state *gs)
+{
     render_obj *robj;
     iterator it;
     vector_iter_begin(&gs->objects, &it);
-    foreach(it, robj) {
-        if(object_is_finished(robj->obj)) {
+    foreach (it, robj) {
+        if (object_is_finished(robj->obj)) {
             /*log_debug("Animation object %d is finished, removing.", robj->obj->cur_animation->id);*/
             object_free(robj->obj);
             omf_free(robj->obj);
@@ -882,71 +943,78 @@ void game_state_cleanup(game_state *gs) {
     }
 }
 
-void game_state_call_move(game_state *gs) {
+void game_state_call_move(game_state *gs)
+{
     render_obj *robj;
     iterator it;
     vector_iter_begin(&gs->objects, &it);
-    foreach(it, robj) {
+    foreach (it, robj) {
         object_move(robj->obj);
     }
 }
 
-void game_state_tick_controllers(game_state *gs) {
+void game_state_tick_controllers(game_state *gs)
+{
     controller_tick(gs->menu_ctrl, gs->tick, &gs->menu_ctrl->extra_events);
-    for(int i = 0; i < game_state_num_players(gs); i++) {
+    for (int i = 0; i < game_state_num_players(gs); i++) {
         game_player *gp = game_state_get_player(gs, i);
         controller *c = game_player_get_ctrl(gp);
-        if(c) {
+        if (c) {
             controller_tick(c, gs->tick, &c->extra_events);
         }
     }
 }
 
-void game_state_dyntick_controllers(game_state *gs) {
-    for(int i = 0; i < game_state_num_players(gs); i++) {
+void game_state_dyntick_controllers(game_state *gs)
+{
+    for (int i = 0; i < game_state_num_players(gs); i++) {
         game_player *gp = game_state_get_player(gs, i);
         controller *c = game_player_get_ctrl(gp);
-        if(c) {
+        if (c) {
             controller_dyntick(c, gs->tick, &c->extra_events);
         }
     }
 }
 
-void game_state_ctrl_events_free(game_state *gs) {
-    for(int i = 0; i < game_state_num_players(gs); i++) {
+void game_state_ctrl_events_free(game_state *gs)
+{
+    for (int i = 0; i < game_state_num_players(gs); i++) {
         game_player *gp = game_state_get_player(gs, i);
         controller *c = game_player_get_ctrl(gp);
-        if(c) {
+        if (c) {
             controller_free_chain(c->extra_events);
             c->extra_events = NULL;
         }
     }
 }
 
-static int sound_pan_lookup_object(void *ctx, uint32_t object_id) {
+static int sound_pan_lookup_object(void *ctx, uint32_t object_id)
+{
     game_state *gs = ctx;
     const object *obj = game_state_find_object(gs, object_id);
-    if(obj == NULL) {
+    if (obj == NULL) {
         return INT_MIN;
     }
     const vec2i pos = object_get_pos(obj);
     return clamp((pos.x - 160) * 100 / 160, -100, 100);
 }
 
-void game_state_call_dynamic_tick_advance(game_state *gs) {
+void game_state_call_dynamic_tick_advance(game_state *gs)
+{
     render_obj *robj;
     iterator it;
     vector_iter_begin(&gs->objects, &it);
-    foreach(it, robj) {
+    foreach (it, robj) {
         object_dynamic_tick_advance(robj->obj);
     }
 }
 
-void game_state_call_dynamic_tick_apply(game_state *gs) {
+void game_state_call_dynamic_tick_apply(game_state *gs)
+{
     render_obj *robj;
     iterator it;
     vector_iter_begin(&gs->objects, &it);
-    foreach(it, robj) {
+    foreach (it, robj) {
         object_dynamic_tick_apply(robj->obj);
     }
 
@@ -954,52 +1022,70 @@ void game_state_call_dynamic_tick_apply(game_state *gs) {
     sound_tracker_tick(&gs->tracker, delta, sound_pan_lookup_object, gs);
 }
 
-void game_state_call_static_tick(game_state *gs) {
+void game_state_call_static_tick(game_state *gs)
+{
     render_obj *robj;
     iterator it;
     vector_iter_begin(&gs->objects, &it);
-    foreach(it, robj) {
+    foreach (it, robj) {
         object_static_tick(robj->obj);
     }
 }
 
-void game_state_merge_sounds(game_state *old, game_state *new) {
+void game_state_merge_sounds(game_state *old, game_state *new)
+{
     sound_tracker_merge(&old->tracker, &new->tracker);
 }
 
 // This function is always called with the same interval, and game speed does not affect it
 static uint32_t logicParts[9];
-#define OMF_TIME_PART(i,call) do{uint32_t t=aster_time_now_ms();call;logicParts[i]+=aster_time_now_ms()-t;}while(0)
-void omf_logic_stats(void){aster_printf("OMF LOGIC ctrl=%u scene=%u input=%u clean=%u anim=%u move=%u collide=%u apply=%u static=%u",logicParts[0],logicParts[1],logicParts[2],logicParts[3],logicParts[4],logicParts[5],logicParts[6],logicParts[7],logicParts[8]);memset(logicParts,0,sizeof(logicParts));}
-void game_state_static_tick(game_state *gs, bool replay) {
+#define OMF_TIME_PART(i, call) \
+    do { \
+        uint32_t t = aster_time_now_ms(); \
+        call; \
+        logicParts[i] += aster_time_now_ms() - t; \
+    } while (0)
+
+void omf_logic_stats(void)
+{
+    aster_printf(
+        "OMF LOGIC ctrl=%u scene=%u input=%u clean=%u anim=%u move=%u collide=%u apply=%u static=%u",
+        logicParts[0], logicParts[1], logicParts[2], logicParts[3], logicParts[4], logicParts[5],
+        logicParts[6], logicParts[7], logicParts[8]);
+    memset(logicParts, 0, sizeof(logicParts));
+}
+
+void game_state_static_tick(game_state *gs, bool replay)
+{
     // Set scene crossfade values
-    if(gs->this_wait_ticks > 0) {
+    if (gs->this_wait_ticks > 0) {
         gs->this_wait_ticks--;
     }
-    if(gs->next_wait_ticks > 0) {
+    if (gs->next_wait_ticks > 0) {
         gs->next_wait_ticks--;
     }
 
     bool crossfade_out = settings_get()->video.crossfade_on && !scene_is_arena(gs->sc);
 
     // We want to load another scene
-    if(gs->this_id != gs->next_id && (gs->next_wait_ticks <= 1 || !crossfade_out)) {
+    if (gs->this_id != gs->next_id && (gs->next_wait_ticks <= 1 || !crossfade_out)) {
         // If this is the end, set run to 0 so that engine knows to close here
-        if(gs->next_id == SCENE_NONE) {
+        if (gs->next_id == SCENE_NONE) {
             log_debug("Next ID is SCENE_NONE! bailing.");
             gs->run = 0;
             return;
         }
 
         // Load up new scene
-        if(game_load_new(gs, gs->next_id)) {
+        if (game_load_new(gs, gs->next_id)) {
             log_error("Error while loading new scene! bailing.");
             gs->run = 0;
             return;
         }
-        if(omf_loading)return;
+        if (omf_loading)
+            return;
         bool crossfade_in = settings_get()->video.crossfade_on && !scene_is_arena(gs->sc);
-        if(crossfade_in) {
+        if (crossfade_in) {
             gs->this_wait_ticks = FRAME_WAIT_TICKS;
             gs->next_wait_ticks = 0;
         } else {
@@ -1011,7 +1097,7 @@ void game_state_static_tick(game_state *gs, bool replay) {
     // Tick controllers
     game_state_tick_controllers(gs);
 
-    if(gs->new_state) {
+    if (gs->new_state) {
         // merge the sounds
         game_state_merge_sounds(gs, gs->new_state);
         gs = gs->new_state;
@@ -1023,96 +1109,100 @@ void game_state_static_tick(game_state *gs, bool replay) {
     scene_static_tick(gs->sc, game_state_is_paused(gs));
 
     // Call static tick functions
-    OMF_TIME_PART(8,game_state_call_static_tick(gs));
+    OMF_TIME_PART(8, game_state_call_static_tick(gs));
 }
 
 // This function is called when the game speed requires it
-void game_state_dynamic_tick(game_state *gs, bool replay) {
+void game_state_dynamic_tick(game_state *gs, bool replay)
+{
 
-    if(replay) {
+    if (replay) {
         // hit pause is meaningless when replaying
         gs->hit_pause = 0;
     }
 
-    if(gs->hit_pause > 0) {
+    if (gs->hit_pause > 0) {
         gs->hit_pause--;
         gs->int_tick++;
         return;
     }
 
     // Change the screen shake value downwards
-    if(gs->screen_shake_horizontal > 0 && !gs->paused) {
+    if (gs->screen_shake_horizontal > 0 && !gs->paused) {
         gs->screen_shake_horizontal--;
     }
 
-    if(gs->screen_shake_vertical > 0 && !gs->paused) {
+    if (gs->screen_shake_vertical > 0 && !gs->paused) {
         gs->screen_shake_vertical--;
     }
 
-    if((gs->screen_shake_horizontal > 0 || gs->screen_shake_vertical > 0) && !replay) {
-        float shake_x = sin(gs->screen_shake_horizontal) * 5 * ((float)gs->screen_shake_horizontal / 15);
-        float shake_y = sin(gs->screen_shake_vertical) * 5 * ((float)gs->screen_shake_vertical / 15);
+    if ((gs->screen_shake_horizontal > 0 || gs->screen_shake_vertical > 0) && !replay) {
+        float shake_x =
+            sin(gs->screen_shake_horizontal) * 5 * ((float)gs->screen_shake_horizontal / 15);
+        float shake_y =
+            sin(gs->screen_shake_vertical) * 5 * ((float)gs->screen_shake_vertical / 15);
         video_move_target((int)shake_x, (int)shake_y);
-        for(int i = 0; i < game_state_num_players(gs); i++) {
+        for (int i = 0; i < game_state_num_players(gs); i++) {
             game_player *gp = game_state_get_player(gs, i);
             controller *c = game_player_get_ctrl(gp);
             // TODO, like audio rumble needs to be reworked to be done in slices
-            if(c && !replay) {
-                controller_rumble(c, max2(gs->screen_shake_horizontal, gs->screen_shake_vertical) / 12.0f,
-                                  max2(gs->screen_shake_horizontal, gs->screen_shake_vertical) *
-                                      game_state_ms_per_dyntick(gs));
+            if (c && !replay) {
+                controller_rumble(
+                    c, max2(gs->screen_shake_horizontal, gs->screen_shake_vertical) / 12.0f,
+                    max2(gs->screen_shake_horizontal, gs->screen_shake_vertical) *
+                        game_state_ms_per_dyntick(gs));
             }
         }
     } else {
         // XXX Occasionally the screen does not return back to normal position
-        if(!replay) {
+        if (!replay) {
             video_move_target(0, 0);
         }
     }
 
-    if(!replay) {
-        OMF_TIME_PART(0,game_state_dyntick_controllers(gs));
+    if (!replay) {
+        OMF_TIME_PART(0, game_state_dyntick_controllers(gs));
     }
 
     // Tick scene
-    OMF_TIME_PART(1,scene_dynamic_tick(gs->sc, game_state_is_paused(gs)));
+    OMF_TIME_PART(1, scene_dynamic_tick(gs->sc, game_state_is_paused(gs)));
 
     // Poll input. If console is opened, do not poll the controllers.
-    if((!console_window_is_open() || gs->init_flags->playback) && !replay) {
-        OMF_TIME_PART(2,scene_input_poll(gs->sc));
+    if ((!console_window_is_open() || gs->init_flags->playback) && !replay) {
+        OMF_TIME_PART(2, scene_input_poll(gs->sc));
     }
 
-    if(!game_state_is_paused(gs)) {
+    if (!game_state_is_paused(gs)) {
         // Clean up objects
-        OMF_TIME_PART(3,game_state_cleanup(gs));
+        OMF_TIME_PART(3, game_state_cleanup(gs));
 
         // Advance animations first so movement and collision see the current tick's frames
-        OMF_TIME_PART(4,game_state_call_dynamic_tick_advance(gs));
+        OMF_TIME_PART(4, game_state_call_dynamic_tick_advance(gs));
 
         // Call object_move for all objects
-        OMF_TIME_PART(5,game_state_call_move(gs));
+        OMF_TIME_PART(5, game_state_call_move(gs));
 
         // Handle physics for all pairs of objects
-        OMF_TIME_PART(6,game_state_call_collide(gs));
+        OMF_TIME_PART(6, game_state_call_collide(gs));
 
         // Tick all objects
-        OMF_TIME_PART(7,game_state_call_dynamic_tick_apply(gs));
+        OMF_TIME_PART(7, game_state_call_dynamic_tick_apply(gs));
 
         // Increment tick
         gs->tick++;
     }
 
-    if(!replay) {
+    if (!replay) {
         // Free extra controller events
         game_state_ctrl_events_free(gs);
     }
 
     // Speed back up
-    if(gs->speed_slowdown_time == 0) {
+    if (gs->speed_slowdown_time == 0) {
         log_debug("Slowdown: Speed back up from %u to %d.", gs->speed, gs->speed_slowdown_previous);
         gs->speed = gs->speed_slowdown_previous;
     }
-    if(gs->speed_slowdown_time >= 0) {
+    if (gs->speed_slowdown_time >= 0) {
         gs->speed_slowdown_time--;
     }
 
@@ -1120,19 +1210,23 @@ void game_state_dynamic_tick(game_state *gs, bool replay) {
     gs->int_tick++;
 }
 
-unsigned int game_state_get_tick(game_state *gs) {
+unsigned int game_state_get_tick(game_state *gs)
+{
     return gs->tick;
 }
 
-game_player *game_state_get_player(const game_state *gs, int player_id) {
+game_player *game_state_get_player(const game_state *gs, int player_id)
+{
     return gs->players[player_id];
 }
 
-int game_state_num_players(game_state *gs) {
+int game_state_num_players(game_state *gs)
+{
     return N_ELEMENTS(gs->players);
 }
 
-void _setup_keyboard(game_state *gs, int player_id, int control_id) {
+void _setup_keyboard(game_state *gs, int player_id, int control_id)
+{
     settings_keyboard *k = &settings_get()->keys;
     // Set up controller
     controller *ctrl = omf_calloc(1, sizeof(controller));
@@ -1141,7 +1235,7 @@ void _setup_keyboard(game_state *gs, int player_id, int control_id) {
 
     // Set up keyboards
     keyboard_keys *keys = omf_calloc(1, sizeof(keyboard_keys));
-    if(control_id == 0) {
+    if (control_id == 0) {
         keys->jump_up = SDL_GetScancodeFromName(k->key1_jump_up);
         keys->jump_right = SDL_GetScancodeFromName(k->key1_jump_right);
         keys->walk_right = SDL_GetScancodeFromName(k->key1_walk_right);
@@ -1167,7 +1261,7 @@ void _setup_keyboard(game_state *gs, int player_id, int control_id) {
 
     keyboard_create(ctrl, keys);
 
-    if(control_id == 0) {
+    if (control_id == 0) {
         controller_set_delay(ctrl, k->input1_delay);
     } else {
         controller_set_delay(ctrl, k->input2_delay);
@@ -1178,7 +1272,8 @@ void _setup_keyboard(game_state *gs, int player_id, int control_id) {
     game_player_set_selectable(player, 1);
 }
 
-void _setup_ai(game_state *gs, int player_id) {
+void _setup_ai(game_state *gs, int player_id)
+{
     controller *ctrl = omf_calloc(1, sizeof(controller));
     game_player *player = game_state_get_player(gs, player_id);
     controller_init(ctrl, gs);
@@ -1190,13 +1285,14 @@ void _setup_ai(game_state *gs, int player_id) {
     game_player_set_selectable(player, 0);
 }
 
-int _setup_joystick(game_state *gs, int player_id, const char *joyname, int offset) {
+int _setup_joystick(game_state *gs, int player_id, const char *joyname, int offset)
+{
     controller *ctrl = omf_calloc(1, sizeof(controller));
     game_player *player = game_state_get_player(gs, player_id);
     controller_init(ctrl, gs);
 
     int res = joystick_create(ctrl, joystick_name_to_id(joyname, offset));
-    if(player_id == 0) {
+    if (player_id == 0) {
         controller_set_delay(ctrl, settings_get()->keys.input1_delay);
     } else {
         controller_set_delay(ctrl, settings_get()->keys.input2_delay);
@@ -1206,7 +1302,8 @@ int _setup_joystick(game_state *gs, int player_id, const char *joyname, int offs
     return res;
 }
 
-static void _setup_rec_controller(game_state *gs, int player_id, sd_rec_file *rec) {
+static void _setup_rec_controller(game_state *gs, int player_id, sd_rec_file *rec)
+{
     controller *ctrl = omf_calloc(1, sizeof(controller));
     game_player *player = game_state_get_player(gs, player_id);
     controller_init(ctrl, gs);
@@ -1215,12 +1312,13 @@ static void _setup_rec_controller(game_state *gs, int player_id, sd_rec_file *re
     game_player_set_ctrl(player, ctrl);
 }
 
-void reconfigure_controller(game_state *gs) {
+void reconfigure_controller(game_state *gs)
+{
     settings_keyboard *k = &settings_get()->keys;
-    if(k->ctrl_type1 == CTRL_TYPE_KEYBOARD) {
+    if (k->ctrl_type1 == CTRL_TYPE_KEYBOARD) {
         _setup_keyboard(gs, 0, 0);
-    } else if(k->ctrl_type1 == CTRL_TYPE_GAMEPAD) {
-        if(!_setup_joystick(gs, 0, k->joy_name1, k->joy_offset1)) {
+    } else if (k->ctrl_type1 == CTRL_TYPE_GAMEPAD) {
+        if (!_setup_joystick(gs, 0, k->joy_name1, k->joy_offset1)) {
             // fallback on the good old keyboard
             k->ctrl_type1 = CTRL_TYPE_KEYBOARD;
             reconfigure_controller(gs);
@@ -1231,9 +1329,10 @@ void reconfigure_controller(game_state *gs) {
     _setup_keyboard(gs, 1, 1);
 }
 
-void game_state_init_demo(game_state *gs) {
+void game_state_init_demo(game_state *gs)
+{
     // Set up player controller
-    for(int i = 0; i < game_state_num_players(gs); i++) {
+    for (int i = 0; i < game_state_num_players(gs); i++) {
         game_player *player = game_state_get_player(gs, i);
         controller *ctrl = omf_calloc(1, sizeof(controller));
         controller_init(ctrl, gs);
@@ -1258,7 +1357,8 @@ void game_state_init_demo(game_state *gs) {
     }
 }
 
-void game_state_menu_poll(game_state *gs, ctrl_event **ev) {
+void game_state_menu_poll(game_state *gs, ctrl_event **ev)
+{
     gs->menu_ctrl->last = gs->menu_ctrl->current;
     gs->menu_ctrl->current = 0;
     gs->menu_ctrl->type = CTRL_TYPE_KEYBOARD;
@@ -1267,12 +1367,13 @@ void game_state_menu_poll(game_state *gs, ctrl_event **ev) {
     joystick_menu_poll_all(gs->menu_ctrl, ev);
 }
 
-void game_state_clone_free(game_state *gs) {
+void game_state_clone_free(game_state *gs)
+{
     // Free objects
     render_obj *robj;
     iterator it;
     vector_iter_begin(&gs->objects, &it);
-    foreach(it, robj) {
+    foreach (it, robj) {
         object_clone_free(robj->obj);
         omf_free(robj->obj);
         vector_delete(&gs->objects, &it);
@@ -1285,7 +1386,7 @@ void game_state_clone_free(game_state *gs) {
     // omf_free(gs->sc);
 
     // Free players
-    for(int i = 0; i < 2; i++) {
+    for (int i = 0; i < 2; i++) {
         // game_player_set_ctrl(gs->players[i], NULL);
         game_player_clone_free(gs->players[i]);
         omf_free(gs->players[i]);
@@ -1293,7 +1394,8 @@ void game_state_clone_free(game_state *gs) {
     // omf_free(gs);
 }
 
-void game_state_free(game_state **_gs) {
+void game_state_free(game_state **_gs)
+{
     game_state *gs = *_gs;
     *_gs = NULL;
 
@@ -1301,7 +1403,7 @@ void game_state_free(game_state **_gs) {
     render_obj *robj;
     iterator it;
     vector_iter_begin(&gs->objects, &it);
-    foreach(it, robj) {
+    foreach (it, robj) {
         object_free(robj->obj);
         omf_free(robj->obj);
         vector_delete(&gs->objects, &it);
@@ -1310,23 +1412,23 @@ void game_state_free(game_state **_gs) {
     sound_tracker_free(&gs->tracker);
 
     // Free scene
-    if(gs->sc) {
+    if (gs->sc) {
         scene_free(gs->sc);
         omf_free(gs->sc);
     }
 
-    if(gs->rec) {
+    if (gs->rec) {
         sd_rec_free(gs->rec);
         omf_free(gs->rec);
     }
 
-    if(gs->init_flags->playback == 1) {
+    if (gs->init_flags->playback == 1) {
         gs->players[0]->pilot = NULL;
         gs->players[1]->pilot = NULL;
     }
 
     // Free players
-    for(int i = 0; i < 2; i++) {
+    for (int i = 0; i < 2; i++) {
         game_player_set_ctrl(gs->players[i], NULL);
         game_player_free(gs->players[i]);
         omf_free(gs->players[i]);
@@ -1335,51 +1437,55 @@ void game_state_free(game_state **_gs) {
     omf_free(gs);
 }
 
-int game_state_ms_per_dyntick(game_state *gs) {
+int game_state_ms_per_dyntick(game_state *gs)
+{
     float tmp;
 
-    switch(gs->this_id) {
-        case SCENE_ARENA0:
-        case SCENE_ARENA1:
-        case SCENE_ARENA2:
-        case SCENE_ARENA3:
-        case SCENE_ARENA4:
-            if(gs->warp_speed) {
-                // If warp speed (for debugging) is turned on, go fast.
-                return 1.0f;
-            }
-            tmp = 8.0f + MS_PER_OMF_TICK_SLOWEST - ((float)gs->speed / 15.0f) * MS_PER_OMF_TICK_SLOWEST;
-            return (int)tmp;
+    switch (gs->this_id) {
+    case SCENE_ARENA0:
+    case SCENE_ARENA1:
+    case SCENE_ARENA2:
+    case SCENE_ARENA3:
+    case SCENE_ARENA4:
+        if (gs->warp_speed) {
+            // If warp speed (for debugging) is turned on, go fast.
+            return 1.0f;
+        }
+        tmp = 8.0f + MS_PER_OMF_TICK_SLOWEST - ((float)gs->speed / 15.0f) * MS_PER_OMF_TICK_SLOWEST;
+        return (int)tmp;
     }
     return STATIC_TICKS;
 }
 
-int render_obj_clone(render_obj *src, render_obj *dst, game_state *gs) {
+int render_obj_clone(render_obj *src, render_obj *dst, game_state *gs)
+{
     memcpy(dst, src, sizeof(render_obj));
     dst->obj = omf_calloc(1, sizeof(object));
     return object_clone(src->obj, dst->obj, gs);
 }
 
-object *game_state_find_object(game_state *gs, uint32_t object_id) {
+object *game_state_find_object(game_state *gs, uint32_t object_id)
+{
     iterator it;
     vector_iter_begin(&gs->objects, &it);
     render_obj *robj;
-    foreach(it, robj) {
-        if(robj->obj->id == object_id) {
+    foreach (it, robj) {
+        if (robj->obj->id == object_id) {
             return robj->obj;
         }
     }
     return NULL;
 }
 
-int game_state_find_objects(game_state *gs, vector *out, bool (*predicate)(const object *obj, void *user_data),
-                            void *ud) {
+int game_state_find_objects(game_state *gs, vector *out,
+                            bool (*predicate)(const object *obj, void *user_data), void *ud)
+{
     int r = 0;
     iterator it;
     vector_iter_begin(&gs->objects, &it);
     render_obj *robj;
-    foreach(it, robj) {
-        if(predicate(robj->obj, ud)) {
+    foreach (it, robj) {
+        if (predicate(robj->obj, ud)) {
             vector_append(out, &robj->obj);
             r++;
         }
@@ -1387,11 +1493,13 @@ int game_state_find_objects(game_state *gs, vector *out, bool (*predicate)(const
     return r;
 }
 
-void game_state_play_sound(game_state *gs, int sound_id, const sound_opts *opts) {
+void game_state_play_sound(game_state *gs, int sound_id, const sound_opts *opts)
+{
     sound_tracker_play(&gs->tracker, gs->tick, gs->clone, sound_id, opts);
 }
 
-int game_state_clone(game_state *src, game_state *dst) {
+int game_state_clone(game_state *src, game_state *dst)
+{
     // copy all the static fields
     memcpy(dst, src, sizeof(game_state));
     // fix any pointers to volatile data
@@ -1404,7 +1512,7 @@ int game_state_clone(game_state *src, game_state *dst) {
     iterator it;
     vector_iter_begin(&src->objects, &it);
     render_obj *robj;
-    foreach(it, robj) {
+    foreach (it, robj) {
         render_obj d;
         render_obj_clone(robj, &d, dst);
         vector_append(&dst->objects, &d);
@@ -1412,7 +1520,7 @@ int game_state_clone(game_state *src, game_state *dst) {
 
     sound_tracker_clone(&dst->tracker, &src->tracker);
 
-    for(int i = 0; i < 2; i++) {
+    for (int i = 0; i < 2; i++) {
         dst->players[i] = omf_calloc(1, sizeof(game_player));
         game_player_clone(src->players[i], dst->players[i]);
         // update HAR object pointers
@@ -1429,44 +1537,54 @@ int game_state_clone(game_state *src, game_state *dst) {
     return 0;
 }
 
-bool game_state_hars_are_alive(game_state *gs) {
-    har *h1 = object_get_userdata(game_state_find_object(gs, game_state_get_player(gs, 0)->har_obj_id));
-    har *h2 = object_get_userdata(game_state_find_object(gs, game_state_get_player(gs, 1)->har_obj_id));
+bool game_state_hars_are_alive(game_state *gs)
+{
+    har *h1 =
+        object_get_userdata(game_state_find_object(gs, game_state_get_player(gs, 0)->har_obj_id));
+    har *h2 =
+        object_get_userdata(game_state_find_object(gs, game_state_get_player(gs, 1)->har_obj_id));
     return (h1->health > 0) && (h2->health > 0);
 }
 
-bool is_netplay(const game_state *gs) {
+bool is_netplay(const game_state *gs)
+{
     return game_state_get_player(gs, 0)->ctrl->type == CTRL_TYPE_NETWORK ||
            game_state_get_player(gs, 1)->ctrl->type == CTRL_TYPE_NETWORK;
 }
 
-bool is_singleplayer(const game_state *gs) {
-    if(gs->rec && gs->init_flags->playback == 1 && gs->rec->p2_controller == REC_CONTROLLER_AI) {
+bool is_singleplayer(const game_state *gs)
+{
+    if (gs->rec && gs->init_flags->playback == 1 && gs->rec->p2_controller == REC_CONTROLLER_AI) {
         return true;
     }
     return game_state_get_player(gs, 1)->ctrl->type == CTRL_TYPE_AI;
 }
 
-bool is_tournament(const game_state *gs) {
+bool is_tournament(const game_state *gs)
+{
     return game_state_get_player(gs, 0)->chr;
 }
 
-bool is_spectator(const game_state *gs) {
-    if(game_state_get_player(gs, 0)->ctrl->type == CTRL_TYPE_SPECTATOR) {
+bool is_spectator(const game_state *gs)
+{
+    if (game_state_get_player(gs, 0)->ctrl->type == CTRL_TYPE_SPECTATOR) {
         return 1;
     }
     return 0;
 }
 
-bool is_demoplay(const game_state *gs) {
+bool is_demoplay(const game_state *gs)
+{
     return game_state_get_player(gs, 0)->ctrl->type == CTRL_TYPE_AI &&
            game_state_get_player(gs, 1)->ctrl->type == CTRL_TYPE_AI;
 }
 
-bool is_twoplayer(const game_state *gs) {
+bool is_twoplayer(const game_state *gs)
+{
     return !is_demoplay(gs) && !is_netplay(gs) && !is_singleplayer(gs);
 }
 
-bool is_rec_playback(const game_state *gs) {
+bool is_rec_playback(const game_state *gs)
+{
     return path_is_set(&gs->init_flags->rec_file) && gs->init_flags->playback == 1;
 }

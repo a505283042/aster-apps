@@ -1,23 +1,32 @@
 """Exercise real game touch rules, including purchases, bombs and pause routes."""
+
 from pathlib import Path
 import shutil
 import subprocess
 import tempfile
 import unittest
 
-PROJECT=Path(__file__).resolve().parents[1]
+PROJECT = Path(__file__).resolve().parents[1]
+
 
 class TouchRules(unittest.TestCase):
     @unittest.skipUnless(shutil.which('cc'), 'native C compiler required')
     def test_direct_touch_actions(self):
         with tempfile.TemporaryDirectory() as name:
-            root=Path(name)
-            (root/'aster_imports.h').write_text('#include <stdint.h>\nint aster_printf(const char*,...);\nuint32_t aster_time_now_ms(void);\n')
-            (root/'test.c').write_text(r'''
+            root = Path(name)
+            (root / 'aster_imports.h').write_text(
+                '#include <stdint.h>\nint aster_printf(const char*,...);\nuint32_t aster_time_now_ms(void);\n'
+            )
+            (root / 'test.c').write_text(
+                r'''
 #include <assert.h>
 #include <stdint.h>
 #include <string.h>
-'''+'#include "'+(PROJECT/'port/game.c').as_posix()+'"\n'+r'''
+'''
+                + '#include "'
+                + (PROJECT / 'port/game.c').as_posix()
+                + '"\n'
+                + r'''
 int aster_printf(const char *s,...){(void)s;return 0;}
 uint32_t aster_time_now_ms(void){return 0;}
 int gm_width(const char *s){(void)s;return 32;}int gm_height(const char *s){(void)s;return 32;}
@@ -44,8 +53,29 @@ int main(void){
  gm_touch(286,14);assert(gm_paused);gm_touch(100,123);assert(gm_state==S_MENU&&!gm_paused);
  gm_touch(286,14);gm_touch(100,160);assert(gm_exit);return 0;
 }
-''')
-            subprocess.run(['cc','-std=c11','-O2','-Wall','-Wextra','-Wno-misleading-indentation','-I',str(root),str(root/'test.c'),'-lm','-o',str(root/'test')],check=True,capture_output=True,text=True)
-            subprocess.run([str(root/'test')],check=True,capture_output=True,text=True)
+'''
+            )
+            subprocess.run(
+                [
+                    'cc',
+                    '-std=c11',
+                    '-O2',
+                    '-Wall',
+                    '-Wextra',
+                    '-Wno-misleading-indentation',
+                    '-I',
+                    str(root),
+                    str(root / 'test.c'),
+                    '-lm',
+                    '-o',
+                    str(root / 'test'),
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            subprocess.run([str(root / 'test')], check=True, capture_output=True, text=True)
 
-if __name__=='__main__':unittest.main()
+
+if __name__ == '__main__':
+    unittest.main()

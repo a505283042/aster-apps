@@ -4,18 +4,20 @@
 #include "utils/allocator.h"
 #include <stdlib.h>
 
-void sprite_create_custom(sprite *sp, vec2i pos, surface *data) {
+void sprite_create_custom(sprite *sp, vec2i pos, surface *data)
+{
     sp->id = -1;
     sp->pos = pos;
     sp->data = data;
 }
 
-void sprite_create(sprite *sp, void *src, int id) {
+void sprite_create(sprite *sp, void *src, int id)
+{
     sd_sprite *sdsprite = (sd_sprite *)src;
     sp->id = id;
     sp->pos = sdsprite->pos;
 
-    if(sdsprite->width == 0 || sdsprite->height == 0) {
+    if (sdsprite->width == 0 || sdsprite->height == 0) {
         sp->data = NULL;
         sp->owned = false;
         return;
@@ -24,9 +26,10 @@ void sprite_create(sprite *sp, void *src, int id) {
     // Load data
     sp->data = omf_calloc(1, sizeof(surface));
     sp->owned = true;
-    if(omf_surface_encoded(sp->data,sdsprite->width,sdsprite->height,&sdsprite->data,sdsprite->len)) {
-        sp->data->render_w=sdsprite->render_width;
-        sp->data->render_h=sdsprite->render_height;
+    if (omf_surface_encoded(sp->data, sdsprite->width, sdsprite->height, &sdsprite->data,
+                            sdsprite->len)) {
+        sp->data->render_w = sdsprite->render_width;
+        sp->data->render_h = sdsprite->render_height;
         return;
     }
     sd_vga_image raw;
@@ -38,7 +41,8 @@ void sprite_create(sprite *sp, void *src, int id) {
     omf_surface_pack(sp->data);
 }
 
-void sprite_create_reference(sprite *sp, void *src, int id, void *data) {
+void sprite_create_reference(sprite *sp, void *src, int id, void *data)
+{
     sd_sprite *sdsprite = (sd_sprite *)src;
     sp->id = id;
     sp->pos = sdsprite->pos;
@@ -46,29 +50,33 @@ void sprite_create_reference(sprite *sp, void *src, int id, void *data) {
     sp->owned = false;
 }
 
-int sprite_clone(sprite *src, sprite *dst) {
+int sprite_clone(sprite *src, sprite *dst)
+{
     memcpy(dst, src, sizeof(sprite));
     dst->data = omf_calloc(1, sizeof(surface));
     surface_create_from(dst->data, src->data);
     return 0;
 }
 
-void sprite_free(sprite *sp) {
-    if(sp->owned) {
+void sprite_free(sprite *sp)
+{
+    if (sp->owned) {
         surface_free(sp->data);
         omf_free(sp->data);
     }
 }
 
-vec2i sprite_get_size(sprite *sp) {
-    if(sp->data != NULL) {
+vec2i sprite_get_size(sprite *sp)
+{
+    if (sp->data != NULL) {
         return vec2i_create(sp->data->w, sp->data->h);
     }
     return vec2i_create(0, 0);
 }
 
-sprite *sprite_copy(sprite *src) {
-    if(src == NULL) {
+sprite *sprite_copy(sprite *src)
+{
+    if (src == NULL) {
         return NULL;
     }
 

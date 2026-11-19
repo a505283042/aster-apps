@@ -1,10 +1,15 @@
 """Compile the real touch adapter; exercise both hardware geometries."""
+
 from pathlib import Path
-import subprocess,tempfile,unittest
-ROOT=Path(__file__).resolve().parents[1];SDK=ROOT.parent.parent/'aster-sdk'
+import subprocess, tempfile, unittest
+
+ROOT = Path(__file__).resolve().parents[1]
+SDK = ROOT.parent.parent / 'aster-sdk'
+
+
 class Controls(unittest.TestCase):
- def test_ownership_geometry_and_release(self):
-  code=r'''
+    def test_ownership_geometry_and_release(self):
+        code = r'''
 #include <assert.h>
 #include "engine.h"
 #include "ui.h"
@@ -34,9 +39,29 @@ int main(void){
  return 0;
 }
 '''
-  with tempfile.TemporaryDirectory() as d:
-   source=Path(d)/'controls.c';source.write_text(code);binary=Path(d)/'controls'
-   includes=[ROOT/'src/port',SDK/'include',SDK/'lib/aster']
-   subprocess.run(['cc','-std=c11','-fno-builtin','-Wno-attributes',*[f'-I{x}' for x in includes],str(source),str(ROOT/'src/port/controls.c'),'-o',str(binary)],check=True,capture_output=True,text=True)
-   subprocess.run([str(binary)],check=True)
-if __name__=='__main__':unittest.main()
+        with tempfile.TemporaryDirectory() as d:
+            source = Path(d) / 'controls.c'
+            source.write_text(code)
+            binary = Path(d) / 'controls'
+            includes = [ROOT / 'src/port', SDK / 'include', SDK / 'lib/aster']
+            subprocess.run(
+                [
+                    'cc',
+                    '-std=c11',
+                    '-fno-builtin',
+                    '-Wno-attributes',
+                    *[f'-I{x}' for x in includes],
+                    str(source),
+                    str(ROOT / 'src/port/controls.c'),
+                    '-o',
+                    str(binary),
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            subprocess.run([str(binary)], check=True)
+
+
+if __name__ == '__main__':
+    unittest.main()

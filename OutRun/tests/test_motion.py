@@ -1,10 +1,15 @@
 """Actual IMU adapter: tilt response, recenter, dead zone and sensor failure."""
+
 from pathlib import Path
-import subprocess,tempfile,unittest
-ROOT=Path(__file__).resolve().parents[1];SDK=ROOT.parent.parent/'aster-sdk'
+import subprocess, tempfile, unittest
+
+ROOT = Path(__file__).resolve().parents[1]
+SDK = ROOT.parent.parent / 'aster-sdk'
+
+
 class Motion(unittest.TestCase):
- def test_filter_and_fallback(self):
-  code=r'''
+    def test_filter_and_fallback(self):
+        code = r'''
 #include <assert.h>
 #include "engine.h"
 #include "ui.h"
@@ -28,8 +33,26 @@ int main(void){uint32_t now=0;
  sample[0]=100;tick(&now);assert(outrun_motion_steer()==0);
  return 0;}
 '''
-  with tempfile.TemporaryDirectory() as d:
-   src=Path(d)/'motion.c';src.write_text(code);binary=Path(d)/'motion'
-   subprocess.run(['cc','-std=c11','-fno-builtin','-Wno-attributes',*[f'-I{x}' for x in [ROOT/'src/port',SDK/'include',SDK/'lib/aster']],str(src),str(ROOT/'src/port/motion.c'),'-o',str(binary)],check=True)
-   subprocess.run([str(binary)],check=True)
-if __name__=='__main__':unittest.main()
+        with tempfile.TemporaryDirectory() as d:
+            src = Path(d) / 'motion.c'
+            src.write_text(code)
+            binary = Path(d) / 'motion'
+            subprocess.run(
+                [
+                    'cc',
+                    '-std=c11',
+                    '-fno-builtin',
+                    '-Wno-attributes',
+                    *[f'-I{x}' for x in [ROOT / 'src/port', SDK / 'include', SDK / 'lib/aster']],
+                    str(src),
+                    str(ROOT / 'src/port/motion.c'),
+                    '-o',
+                    str(binary),
+                ],
+                check=True,
+            )
+            subprocess.run([str(binary)], check=True)
+
+
+if __name__ == '__main__':
+    unittest.main()
