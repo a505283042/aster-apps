@@ -1,273 +1,1076 @@
 /* SPDX-License-Identifier: MIT */
 #include <aster_imports.h>
 #include <aster_gfx_engine.h>
-static aster_handle_t surface,dir;
-static aster_ge_t ge;
+#include "cover.h"
+#include "lrc.h"
+#include "paper.h"
+#include "shake.h"
+
+enum page { LYRICS, PLAYBACK, LIBRARY, PAPER };
+enum control {
+    NONE, CLOSE, VOLUME, SEEK,
+    PREVIOUS, TOGGLE, NEXT, DEMO, PAGE_PREV, PAGE_NEXT, TRACK_FIRST
+};
+enum { DESIGN = 460, ROWS = 5, TRACK_LIMIT = 64, PROGRESS_X = 33, PROGRESS_W = 394 };
+enum {
+    HEADER_END = 59, CONTENT_END = 455, LYRIC_SEEK_TOP = 370, LYRIC_PROGRESS = 393,
+    ROW_TOP = 108, ROW_H = 57, LIBRARY_PAGER = ROW_TOP + ROWS * ROW_H,
+    VOLUME_X = 76, VOLUME_W = 161, VOLUME_Y = 316,
+    PLAY_SEEK_X = 27, PLAY_SEEK_W = 209, PLAY_PROGRESS = 415,
+    PANEL_X = 254, PANEL_Y = 301, PANEL_W = 184, PANEL_H = 140,
+    STEP_X = PANEL_X+8, STEP_W = 58, STEP_UP = PANEL_Y+8, STEP_DOWN = PANEL_Y+74,
+    STEP_H = 58, TOGGLE_X = PANEL_X+74, TOGGLE_W = 102
+};
+#define RGB(r,g,b) ((uint16_t)(((r) & 0xf8) << 8 | ((g) & 0xfc) << 3 | (b) >> 3))
+static const uint16_t background = RGB(13,17,22), rim = RGB(16,22,29),
+    chrome = RGB(26,34,44), ink = RGB(243,240,232), muted = RGB(162,170,178),
+    border = RGB(53,60,71), gold = RGB(237,186,115),
+    panel = RGB(34,43,54), selected = RGB(48,42,36),
+    lyric_accent = RGB(255,157,78), rail = RGB(58,68,81);
+
+static aster_handle_t surface, directory, lyric_file;
+static aster_ge_t gfx;
 static aster_gfx_cmd_t commands[160];
 static uint8_t arena[4096];
-static aster_player_info_t info;
-static uint32_t bluetooth_rate;
-
-static uint32_t width,height,last_poll;
-static uint32_t mode=ASTER_PLAYER_LOCAL;
-static int dirty=1,library,page,files,scanning,pressed;
-static char names[64][160],message[128],pending_file[256],current_file[256];
+static uint32_t width, height, content_w, content_h;
+static int left, top;
+static aster_player_info_t player;
+static uint32_t last_poll, visible_second;
+static int volume, library_page, track_count, scan_error;
+static bool dirty, library_scanned;
+static enum page page = PLAYBACK;
+static char tracks[TRACK_LIMIT][248], current_file[256], queued_file[256];
+static char message[128];
 static uint32_t message_until;
-static int seeking;
-static uint32_t seek_preview_ms,seek_deadline;
-static int volume=40,touch_start_x,touch_start_y;
-enum { VOLUME_TOP=60, VOLUME_HEIGHT=44, VOLUME_X=94, VOLUME_WIDTH=254 };
-static const uint16_t bg=0x0863,panel=0x10e5,muted=0x9513,white=0xef7c,accent=0x96d5;
-static int sx(int x){return x*(int)width/460;}
-static int sy(int y){return y*(int)height/460;}
-static void rect(int x,int y,int w,int h,uint16_t color,int radius){aster_ge_rect_r(&ge,sx(x),sy(y),sx(w),sy(h),color,sx(radius),0);}
-static void text(int x,int y,int px,uint16_t color,const char *value,int maxw){
- char out[224];int size=aster_text_for_display(px,width,height);
- aster_text_elide(size,value,strlen(value),sx(maxw),out,sizeof(out));
- aster_ge_text(&ge,sx(x),sy(y)+aster_text_asc(size),size,color,ASTER_GFX_NOBG,out);
-}
-static void center(int x,int y,int w,int px,uint16_t color,const char *value){
- char out[224];
- int size=aster_text_for_display(px,width,height);
- aster_text_elide(size,value,strlen(value),sx(w),out,sizeof(out));
- int tw=aster_gfx_text_w(size,out,strlen(out));
- aster_ge_text(&ge,sx(x)+(sx(w)-tw)/2,sy(y)+aster_text_asc(size),size,color,ASTER_GFX_NOBG,out);
-}
-static void notice(const char *value){aster_snprintf(message,sizeof(message),"%s",value);message_until=aster_time_now_ms()+4000;dirty=1;}
-static int request(uint32_t command,uint32_t value,const char *path){
- aster_player_request_t r={.size=sizeof(r),.version=1,.command=command,.value=value};
- if(path)aster_snprintf(r.path,sizeof(r.path),"%s",path);
- int result=aster_player_control(&r,sizeof(r));
- if(result<0){
-  if(result==ASTER_EBUSY)notice("音频正忙，请稍后再试");
-  else if(result==ASTER_ESTATE)notice(mode==ASTER_PLAYER_BLUETOOTH?"请先连接手机并打开音乐应用":"蓝牙音频输出不可用，请检查系统设置");
-  else if(result==ASTER_ENOTSUP)notice("当前设备不支持此功能");
-  else {aster_snprintf(message,sizeof(message),"操作失败 %d",result);message_until=aster_time_now_ms()+4000;dirty=1;}
- }
- return result;
-}
-static void scan_close(void){if(dir){aster_fs_closedir(dir);dir=0;}scanning=0;}
-static void scan_start(void){
- scan_close();files=page=0;
- int r=aster_fs_opendir("/music",6,&dir);
- if(r<0){notice("将 MP3、WAV 或 FLAC 放入 SD 的 music 目录");dir=0;return;}
- scanning=1;
-}
-static int extension(const char *name){
- int n=(int)strlen(name);if(n<4)return 0;
- const char *p=name+n-4;
- if(p[0]=='.' && (p[1]=='m'||p[1]=='M') && (p[2]=='p'||p[2]=='P') && p[3]=='3')return 1;
- if(p[0]=='.' && (p[1]=='w'||p[1]=='W') && (p[2]=='a'||p[2]=='A') && (p[3]=='v'||p[3]=='V'))return 1;
- if(n<5)return 0;
- p=name+n-5;
- return p[0]=='.' && (p[1]=='f'||p[1]=='F') && (p[2]=='l'||p[2]=='L') && (p[3]=='a'||p[3]=='A') && (p[4]=='c'||p[4]=='C');
-}
-static void scan_tick(void){
- for(int i=0;i<2 && scanning;i++){
-  char name[256];uint32_t isdir=0;
-  int r=aster_fs_dir_next(dir,name,sizeof(name),&isdir);
-  if(r<=0){scan_close();if(r<0)notice("读取音乐目录失败");dirty=1;break;}
-  if(!isdir && extension(name) && strlen(name)<sizeof(names[0])){
-   aster_snprintf(names[files++],sizeof(names[0]),"%s",name);dirty=1;
-   if(files==64){scan_close();notice("本页曲库最多显示 64 首");}
-  }
- }
-}
-static void button(int id,int x,int y,int w,int h,const char *label,int selected){
- rect(x,y,w,h,pressed==id?0x2948:selected?accent:panel,12);
- center(x,y+(h-24)/2,w,16,selected?bg:white,label);
-}
-static const char *state_text(void){
- if(info.state==ASTER_PLAYER_ERROR)return "播放发生错误";
- if(info.state==ASTER_PLAYER_STOPPING)return "正在切换音频模式...";
- if(mode==ASTER_PLAYER_BLUETOOTH){
-  if(info.mode!=ASTER_PLAYER_BLUETOOTH)return "蓝牙接收未开启";
-  if(!(info.flags&ASTER_PLAYER_F_CONNECTED))return "等待手机连接 Aster-S31 Audio";
-  return info.state==ASTER_PLAYER_PLAYING?"手机播放 · SBC":"手机已连接 · 已暂停";
- }
- return info.state==ASTER_PLAYER_PLAYING?((info.flags&ASTER_PLAYER_F_BT_OUTPUT)?"本地播放 · 蓝牙音箱输出":"本地播放 · 原采样率输出"):info.state==ASTER_PLAYER_PAUSED?"本地播放 · 已暂停":
-  info.state==ASTER_PLAYER_OPENING?"正在打开音乐...":info.state==ASTER_PLAYER_ENDED?"播放结束":"选择一首音乐开始";
-}
-static void draw(void){
- char line[160];aster_ge_clear(&ge,bg);
- button(1,18,14,64,42,"返回",0);
- center(88,22,284,18,white,"Aster 音乐");
- if(mode==ASTER_PLAYER_LOCAL)button(2,372,14,70,42,library?"播放":"曲库",0);
- rect(18,VOLUME_TOP,424,VOLUME_HEIGHT,panel,12);
- text(30,72,14,muted,"音量",60);
- rect(VOLUME_X,80,VOLUME_WIDTH,4,0x2948,2);
- int fill=volume*VOLUME_WIDTH/100;
- if(fill>0)rect(VOLUME_X,80,fill,4,accent,2);
- rect(VOLUME_X-7+fill,74,14,16,accent,7);
- aster_snprintf(line,sizeof(line),"%u%%",volume);
- text(369,71,16,white,line,61);
- if(library && mode==ASTER_PLAYER_LOCAL){
-  text(22,110,14,muted,"SD / music · MP3 / WAV / FLAC",310);button(5,338,104,106,36,"试听示例",0);
-  for(int i=0;i<4;i++){
-   int index=page*4+i;if(index>=files)break;
-   rect(16,150+i*51,428,44,pressed==20+i?0x2948:panel,8);
-   text(30,159+i*51,16,white,names[index],400);
-  }
-  if(!files)center(20,230,420,16,muted,scanning?"正在读取音乐目录...":"曲库暂无音乐，可先试听示例");
-  button(6,16,374,104,42,"上一页",0);button(7,340,374,104,42,"下一页",0);
-  aster_snprintf(line,sizeof(line),"%u / %u · %u 首",page+1,(files+3)/4?(files+3)/4:1,files);center(120,385,220,14,muted,line);
- } else {
-  text(24,112,14,muted,state_text(),412);
-  const char *title=info.title;
-  if(mode==ASTER_PLAYER_LOCAL){
-   title=info.path;
-   for(const char *p=title;*p;p++)if(*p=='/')title=p+1;
-   if(!*title)title="未选择曲目";
-  } else if(!*title)title="等待手机提供曲目信息";
-  text(24,134,22,white,title,412);
-  const char *artist=info.artist[0]?info.artist:info.album;
-  if(*artist)text(24,164,15,muted,artist,412);
-  rect(18,190,424,108,panel,15);
-  center(24,232,412,16,muted,"暂无歌词");
-  if(mode==ASTER_PLAYER_LOCAL && info.duration_ms){
-   uint32_t position=seeking?seek_preview_ms:info.position_ms;
-   rect(24,324,412,4,panel,2);int n=(int)((uint64_t)position*412/info.duration_ms);if(n>412)n=412;if(n>0)rect(24,324,n,4,accent,2);
-   rect(17+n,318,14,18,accent,7);
-   if(seeking){
-    rect(102,292,256,26,panel,9);aster_snprintf(line,sizeof(line),"跳转 %u 秒 / %u 秒",position/1000,info.duration_ms/1000);center(102,297,256,14,white,line);
-   }
-  }
-  button(8,40,358,100,56,"上一首",0);
-  button(9,160,352,140,64,info.state==ASTER_PLAYER_PLAYING?"暂停":"播放",1);
-  button(10,320,358,100,56,"下一首",0);
-  if(mode==ASTER_PLAYER_LOCAL){
-   if((info.flags&ASTER_PLAYER_F_BT_OUTPUT))aster_snprintf(line,sizeof(line),"源 %u Hz / %u bit · SBC %u Hz / 16 bit",info.rate,info.bits,bluetooth_rate);
-   else aster_snprintf(line,sizeof(line),"%u 秒 / %u 秒 · %u Hz / %u bit",info.position_ms/1000,info.duration_ms/1000,info.rate,info.bits);
-   center(16,431,428,14,muted,line);
-  } else center(16,431,428,14,muted,"退出界面后蓝牙音乐仍可继续播放");
- }
- if(message[0]){rect(12,365,436,45,0x2948,10);center(16,378,428,14,white,message);}
- int result=aster_ge_present(&ge);if(result<0)aster_errfmt("player render %d",result);
-}
-static int hit(int x,int y){
- if(y>=14 && y<56)return x>=18 && x<82?1:mode==ASTER_PLAYER_LOCAL && x>=372 && x<442?2:0;
- if(y>=VOLUME_TOP && y<VOLUME_TOP+VOLUME_HEIGHT)
-  return x>=VOLUME_X-16 && x<=VOLUME_X+VOLUME_WIDTH+16?11:0;
- if(library && mode==ASTER_PLAYER_LOCAL){
-  if(y>=104 && y<142 && x>=330)return 5;
-  if(y>=150 && y<354)return 20+(y-150)/51;
-  if(y>=374 && y<416)return x<125?6:x>=335?7:0;
- } else {
-  if(mode==ASTER_PLAYER_LOCAL && info.duration_ms && y>=302 && y<346 && x>=10 && x<=450)return 12;
-  if(y>=352 && y<416){
-   if(x>=160 && x<300)return 9;
-   if(y>=358 && y<414 && x>=40 && x<140)return 8;
-   if(y>=358 && y<414 && x>=320 && x<420)return 10;
-  }
- }
- return 0;
-}
-static uint32_t playback_output(void)
+
+static lrc_t lyrics;
+static unsigned char lyric_bytes[LRC_FILE_LIMIT];
+static unsigned char gbk_table[LRC_GBK_BYTES];
+static bool gbk_ready;
+static size_t lyric_size;
+static char lyric_track[256];
+static bool lyric_error;
+static int lyric_line = -1;
+static uint32_t lyric_scroll;
+static bool lyric_animating;
+static int paper_line = -1;
+static unsigned paper_sung, paper_previous, paper_style;
+static uint32_t paper_began;
+static bool imu_available;
+static shake_t shake;
+static uint32_t shake_after, imu_sequence;
+
+static struct {
+    bool down, moved, rejected, page_swipe;
+    int x, y, control;
+} finger;
+static enum { SEEK_IDLE, SEEK_DRAG, SEEK_WAIT } seeking;
+static uint32_t seek_position, seek_deadline;
+
+static int sx(int x) { return x * (int)content_w / DESIGN; }
+static int sy(int y) { return y * (int)content_h / DESIGN; }
+static int clamp(int n, int min, int max) { return n < min ? min : n > max ? max : n; }
+static int abs_i(int n) { return n < 0 ? -n : n; }
+
+static void box(int x, int y, int w, int h, int radius, uint16_t color, bool outline)
 {
- aster_player_bt_list_t list={.size=sizeof(list),.version=1};
- if(!aster_player_bt_list(&list,sizeof(list)) &&
-    list.state==ASTER_PLAYER_BT_CONNECTED && list.output_rate)
-  return ASTER_PLAYER_OUTPUT_BLUETOOTH;
- return ASTER_PLAYER_OUTPUT_WIRED;
+    int px = left + sx(x), py = top + sy(y);
+    int pw = sx(x+w) - sx(x), ph = sy(y+h) - sy(y);
+    if (pw > 0 && ph > 0)
+        aster_ge_rect_r(&gfx, px, py, pw, ph, color, sx(radius), outline);
 }
 
-static void queue_file(const char *path){
- seeking=0;
- if(info.mode==ASTER_PLAYER_BLUETOOTH){notice("请先在系统蓝牙设置中断开手机");return;}
- if(path!=current_file)aster_snprintf(current_file,sizeof(current_file),"%s",path);
- if(info.state==ASTER_PLAYER_PLAYING || info.state==ASTER_PLAYER_PAUSED || info.state==ASTER_PLAYER_OPENING || info.state==ASTER_PLAYER_STOPPING){
-  aster_snprintf(pending_file,sizeof(pending_file),"%s",path);request(ASTER_PLAYER_STOP,0,0);
- } else request(ASTER_PLAYER_PLAY_FILE,playback_output(),path);
- library=0;dirty=1;
+static void circle(int x, int y, int r, uint16_t color)
+{
+    aster_ge_ellipse(&gfx, left + sx(x), top + sy(y), sx(r), sy(r), color, 0);
 }
-static void play_index(int index){
- if(index<0 || index>=files)return;
- char path[256];aster_snprintf(path,sizeof(path),"/music/%s",names[index]);
- queue_file(path);
-}
-static void activate(int id){
- seeking=0;
- if(id==1){if(library){library=0;scan_close();dirty=1;}else aster_app_exit(0);return;}
- if(id==2){library=!library;if(library)scan_start();else scan_close();}
- else if(id==5){queue_file("/assets/audio/demo.flac");}
- else if(id==6 && page>0)page--;
- else if(id==7 && (page+1)*4<files)page++;
- else if(id>=20 && id<24)play_index(page*4+id-20);
- else if(id==9){
-  if(mode==ASTER_PLAYER_BLUETOOTH && !(info.flags&ASTER_PLAYER_F_CONNECTED))notice("请先连接手机");
-  else if(mode==ASTER_PLAYER_LOCAL && (info.state==ASTER_PLAYER_IDLE || info.state==ASTER_PLAYER_ENDED || info.state==ASTER_PLAYER_ERROR)){if(current_file[0])queue_file(current_file);else {library=1;scan_start();}}
-  else request(info.state==ASTER_PLAYER_PLAYING?ASTER_PLAYER_PAUSE:ASTER_PLAYER_RESUME,0,0);
- } else if(id==8 || id==10){
-  if(mode==ASTER_PLAYER_BLUETOOTH){if(info.mode==ASTER_PLAYER_BLUETOOTH)request(id==8?ASTER_PLAYER_PREVIOUS:ASTER_PLAYER_NEXT,0,0);else notice("请先开启蓝牙接收");}
-  else {
-   int found=-1;for(int i=0;i<files;i++){const char *p=info.path,*base=p;while(*p){if(*p=='/')base=p+1;p++;}if(!strcmp(base,names[i]))found=i;}
-   if(files)play_index(found<0?0:(found+(id==8?files-1:1))%files);else {library=1;scan_start();}
-  }
- }
- dirty=1;
-}
-static void drag(int id,int x){
- if(id==11){int value=(x-VOLUME_X)*100/VOLUME_WIDTH;if(value<0)value=0;if(value>100)value=100;
-  if(value!=volume){int r=aster_audio_set_volume(value);if(r>=0)volume=value;dirty=1;}
- } else if(id==12 && info.duration_ms){
-  int at=x-24;if(at<0)at=0;if(at>412)at=412;
-  seek_preview_ms=(uint32_t)((uint64_t)info.duration_ms*at/412);seeking=1;dirty=1;
- }
 
+static void line(int x, int y, int to_x, int to_y, uint16_t color)
+{
+    aster_ge_line_aa(&gfx, left+sx(x), top+sy(y), left+sx(to_x), top+sy(to_y), color);
 }
-ASTER_APP_EXPORT int aster_app_init(void){
- aster_display_info_t display={.size=sizeof(display),.version=1};int r=aster_display_get_info(0,&display,sizeof(display));if(r<0)return r;
- width=display.app_width;height=display.app_height;if(width<300 || height<300)return ASTER_ENOTSUP;
- info=(aster_player_info_t){.size=sizeof(info),.version=1};r=aster_player_get_info(&info,sizeof(info));if(r<0)return r;
- mode=info.mode;volume=aster_audio_get_volume();if(volume<0)volume=40;
- aster_surface_desc_t desc={.size=sizeof(desc),.version=1,.width=width,.height=height,.format=ASTER_PIXEL_RGB565};
- r=aster_surface_create(&desc,sizeof(desc),&surface);if(r<0)return r;
- aster_ge_init(&ge,surface,width,height,commands,160,arena,sizeof(arena));
- aster_app_set_framerate(20);dirty=1;aster_printf("HiFi init %ux%u caps=%u",width,height,info.capabilities);return 0;
+
+static void triangle(int x, int y, int to_x, int to_y, int end_x, int end_y, uint16_t color)
+{
+    aster_ge_tri(&gfx, left+sx(x), top+sy(y), left+sx(to_x), top+sy(to_y),
+                 left+sx(end_x), top+sy(end_y), color);
 }
-ASTER_APP_EXPORT void aster_app_event(const aster_event_t *event){
- if(!event || !surface)return;
- if(event->type==ASTER_EVENT_FRAME){
-  uint32_t now=aster_time_now_ms();if(aster_gfx_fonts_pending())dirty=1;scan_tick();
-  if(now-last_poll>=300){
-   last_poll=now;aster_player_info_t next={.size=sizeof(next),.version=1};
-   if(!aster_player_get_info(&next,sizeof(next)) && memcmp(&next,&info,sizeof(info))){
-    info=next;dirty=1;
-    if(mode!=info.mode){
-     mode=info.mode;library=0;scan_close();pending_file[0]=0;pressed=0;seeking=0;
+
+enum align { LEFT, CENTER, RIGHT };
+static int font(int px)
+{
+    return aster_text_snap((int)((content_w * (uint32_t)px + DESIGN/2) / DESIGN));
+}
+
+static void text_run(int x, int py, int w, int size, uint16_t color,
+                     const char *value, enum align align)
+{
+    int span = sx(w);
+    int offset = 0;
+    if (align != LEFT) {
+        int advance = aster_gfx_text_w(size, value, strlen(value));
+        if (advance > 0 && advance < span) offset = (span - advance) / (align == CENTER ? 2 : 1);
     }
-   }
-   aster_player_bt_list_t route={.size=sizeof(route),.version=1};
-   if(!aster_player_bt_list(&route,sizeof(route)) && route.output_rate!=bluetooth_rate){
-    bluetooth_rate=route.output_rate;dirty=1;
-   }
-   if(seeking==2){
-    uint32_t delta=info.position_ms>seek_preview_ms?info.position_ms-seek_preview_ms:seek_preview_ms-info.position_ms;
-    if(delta<1000 || (int32_t)(now-seek_deadline)>=0 || info.state==ASTER_PLAYER_ERROR){seeking=0;dirty=1;}
-   }
-   int value=aster_audio_get_volume();if(value>=0 && value!=volume){volume=value;dirty=1;}
-   if(pending_file[0] && info.mode==ASTER_PLAYER_LOCAL && (info.state==ASTER_PLAYER_IDLE || info.state==ASTER_PLAYER_ENDED || info.state==ASTER_PLAYER_ERROR)){
-    request(ASTER_PLAYER_PLAY_FILE,playback_output(),pending_file);
-    pending_file[0]=0;
-   }
-  }
-  if(message[0] && (int32_t)(now-message_until)>=0){message[0]=0;dirty=1;}
-  if(dirty){draw();dirty=0;}
- } else if(event->type==ASTER_EVENT_TOUCH && event->u.touch.slot==0){
-  int x=event->u.touch.x*460/(int)width,y=event->u.touch.y*460/(int)height;
-  if(event->u.touch.action==ASTER_TOUCH_DOWN){pressed=hit(x,y);touch_start_x=x;touch_start_y=y;if(pressed==11 || pressed==12)drag(pressed,x);dirty=1;}
-  else if(event->u.touch.action==ASTER_TOUCH_MOVE){
-   if(pressed==11 || pressed==12)drag(pressed,x);
-   else if(pressed){int dx=x-touch_start_x,dy=y-touch_start_y;if(dx*dx+dy*dy>144){pressed=0;dirty=1;}}
-  }
-  else if(event->u.touch.action==ASTER_TOUCH_UP){int id=pressed;pressed=0;if(id==12){
-    drag(id,x);
-    if(!request(ASTER_PLAYER_SEEK,seek_preview_ms,0)){seeking=2;seek_deadline=aster_time_now_ms()+2000;}else seeking=0;
-   }else if(id && id==hit(x,y))activate(id);dirty=1;}
- } else if(event->type==ASTER_EVENT_KEY && event->u.key.pressed && event->u.key.code==1)aster_app_exit(0);
+    aster_ge_text(&gfx, left + sx(x) + offset, top + py + aster_text_asc(size),
+                  size, color, ASTER_GFX_NOBG, value);
 }
-ASTER_APP_EXPORT void aster_app_pause(void){pressed=0;seeking=0;}
-ASTER_APP_EXPORT void aster_app_resume(void){pressed=0;seeking=0;dirty=1;last_poll=0;}
-static void cleanup(void){scan_close();if(surface){aster_surface_destroy(surface);surface=0;}}
-ASTER_APP_EXPORT void aster_app_stop(void){cleanup();}
-ASTER_APP_EXPORT void aster_app_destroy(void){cleanup();}
+
+static void text(int x, int y, int w, int px, uint16_t color, const char *value, enum align align)
+{
+    if (!value[0]) return;
+    char shown[224];
+    int size = font(px);
+    aster_text_elide(size, value, strlen(value), sx(w), shown, sizeof(shown));
+    text_run(x, sy(y), w, size, color, shown, align);
+}
+
+static bool bluetooth_input(void) { return player.mode == ASTER_PLAYER_BLUETOOTH; }
+
+static const char *basename_of(const char *path)
+{
+    const char *name = path;
+    for (; *path; path++) if (*path == '/') name = path + 1;
+    return name;
+}
+
+static const char *sandbox_track(const char *path)
+{
+    static const char example[] = "/assets/audio/demo.flac";
+    static const char sd_app[] = "/SD:/aster/apps/aster.hifi/";
+    static const char sd_alias[] = "/SD/aster/apps/aster.hifi/";
+    if (!strncmp(path, "/SD:/music/", 11)) return path + 4;
+    if (!strncmp(path, "/SD/music/", 10)) return path + 3;
+    if (!strncmp(path, "/music/", 7) || !strcmp(path, example)) return path;
+    if (!strncmp(path, sd_app, sizeof(sd_app)-1) ||
+        !strncmp(path, sd_alias, sizeof(sd_alias)-1)) {
+        size_t length = strlen(path);
+        if (length >= sizeof(example)-1 && !strcmp(path+length-(sizeof(example)-1), example))
+            return example;
+    }
+    return "";
+}
+
+static char lower(char c) { return c >= 'A' && c <= 'Z' ? c + ('a' - 'A') : c; }
+
+static const char *format(const char *path)
+{
+    const char *ext = NULL;
+    for (const char *p = basename_of(path); *p; p++) if (*p == '.') ext = p + 1;
+    if (!ext) return "";
+    char kind[5] = {0};
+    size_t n = strlen(ext);
+    if (n >= sizeof(kind)) return "";
+    for (size_t i = 0; i < n; i++) kind[i] = lower(ext[i]);
+    if (!strcmp(kind, "mp3")) return "MP3";
+    if (!strcmp(kind, "wav")) return "WAV";
+    if (!strcmp(kind, "flac")) return "FLAC";
+    return "";
+}
+
+static void display_name(const char *path, char name[256])
+{
+    const char *base = basename_of(path);
+    size_t length = strlen(base);
+    if (*format(base)) length -= strlen(format(base)) + 1;
+    memcpy(name, base, length);
+    name[length] = 0;
+}
+
+static bool numeric_title(const char *value)
+{
+    while (*value == ' ' || *value == '\t') value++;
+    const char *start = value;
+    while (*value >= '0' && *value <= '9') value++;
+    if (value == start) return false;
+    while (*value == ' ' || *value == '\t') value++;
+    return !*value;
+}
+
+static const char *title(char name[256])
+{
+    if (bluetooth_input()) return *player.title ? player.title : "等待手机播放";
+    if (*lyrics.title && !numeric_title(lyrics.title) &&
+        !strcmp(lyric_track, sandbox_track(player.path))) return lyrics.title;
+    if (!strcmp(sandbox_track(player.path), "/assets/audio/demo.flac")) return "试听示例";
+    if (*player.path) {
+        display_name(player.path, name);
+        return name;
+    }
+    return "选择一首音乐";
+}
+
+static const char *artist(void)
+{
+    if (!bluetooth_input() && *lyrics.artist && !strcmp(lyric_track, sandbox_track(player.path)))
+        return lyrics.artist;
+    return *player.artist ? player.artist : player.album;
+}
+
+static void notice(const char *value)
+{
+    aster_snprintf(message, sizeof(message), "%s", value);
+    message_until = aster_time_now_ms() + 3500;
+    dirty = true;
+}
+
+static int control(uint32_t command, uint32_t value, const char *path)
+{
+    aster_player_request_t request = {
+        .size = sizeof(request), .version = 1, .command = command, .value = value
+    };
+    if (path) aster_snprintf(request.path, sizeof(request.path), "%s", path);
+    int result = aster_player_control(&request, sizeof(request));
+    if (result == ASTER_EBUSY) notice("音频正忙，请稍后再试");
+    else if (result == ASTER_ESTATE && bluetooth_input()) notice("请在手机上打开音乐应用");
+    else if (result == ASTER_ENOTSUP) notice("当前设备或曲目不支持此操作");
+    else if (result < 0) {
+        char value_text[64];
+        aster_snprintf(value_text, sizeof(value_text), "操作失败 (%d)", result);
+        notice(value_text);
+    }
+    return result;
+}
+
+static void scan_close(void)
+{
+    if (directory) aster_fs_closedir(directory);
+    directory = 0;
+}
+
+static void scan_start(void)
+{
+    scan_close();
+    track_count = library_page = 0;
+    library_scanned = false;
+    scan_error = aster_fs_opendir("/music", 6, &directory);
+    if (scan_error < 0) { directory = 0; library_scanned = true; }
+}
+
+static void scan_tick(void)
+{
+    for (unsigned i = 0; directory && i < 4; i++) {
+        char name[256];
+        uint32_t is_dir = 0;
+        int n = aster_fs_dir_next(directory, name, sizeof(name), &is_dir);
+        if (n <= 0) {
+            scan_error = n;
+            scan_close();
+            library_scanned = true;
+        } else if (!is_dir && (size_t)n < sizeof(tracks[0])) {
+            name[n] = 0;
+            if (*format(name)) {
+                memcpy(tracks[track_count++], name, n + 1);
+                if (track_count == TRACK_LIMIT) { scan_close(); library_scanned = true; }
+            }
+        }
+        if (page == LIBRARY) dirty = true;
+    }
+}
+
+static void lyrics_close(void)
+{
+    if (lyric_file) aster_fs_close(lyric_file);
+    lyric_file = 0;
+}
+
+static void lyrics_track(const char *path)
+{
+    if (!strcmp(path, lyric_track)) return;
+    lyrics_close();
+    aster_snprintf(lyric_track, sizeof(lyric_track), "%s", path);
+    lrc_parse(&lyrics, NULL, 0, NULL);
+    lyric_size = 0;
+    lyric_error = false;
+    lyric_line = -1;
+    paper_line = -1;
+    paper_sung = 0;
+    lyric_animating = false;
+    dirty = true;
+    if (!*format(path)) return;
+    char sidecar[256];
+    size_t prefix = strlen(path) - strlen(format(path));
+    if (prefix + 4 > sizeof(sidecar)) return;
+    memcpy(sidecar, path, prefix);
+    memcpy(sidecar + prefix, "lrc", 4);
+    int r = aster_fs_open(sidecar, prefix + 3, ASTER_FS_O_RDONLY, &lyric_file);
+    if (r < 0) { lyric_file = 0; lyric_error = r != ASTER_ENOENT; }
+}
+
+static bool load_gbk(void)
+{
+    if (gbk_ready) return true;
+    static const char path[] = "/assets/text/gbk.bin";
+    aster_handle_t file;
+    if (aster_fs_open(path, sizeof(path)-1, ASTER_FS_O_RDONLY, &file) < 0) return false;
+    size_t used = 0;
+    while (used < sizeof(gbk_table)) {
+        int n = aster_fs_read(file, gbk_table + used, sizeof(gbk_table) - used);
+        if (n <= 0) break;
+        used += n;
+    }
+    aster_fs_close(file);
+    gbk_ready = used == sizeof(gbk_table);
+    return gbk_ready;
+}
+
+static void lyrics_read(void)
+{
+    if (!lyric_file) return;
+    size_t remaining = sizeof(lyric_bytes) - lyric_size;
+    unsigned char extra;
+    int n = remaining
+        ? aster_fs_read(lyric_file, lyric_bytes + lyric_size, remaining < 4096 ? remaining : 4096)
+        : aster_fs_read(lyric_file, &extra, 1);
+    if (n > 0 && remaining) {
+        lyric_size += n;
+        return;
+    }
+    lyrics_close();
+    lyric_error = n != 0;
+    if (!lyric_error) {
+        enum lrc_encoding encoding = lrc_detect(lyric_bytes, lyric_size);
+        lyric_error = encoding == LRC_GBK && !load_gbk();
+        if (!lyric_error) {
+            lrc_parse(&lyrics, lyric_bytes, lyric_size, gbk_table);
+            const char *name = encoding == LRC_GBK ? "GBK" : encoding == LRC_UTF8 ? "UTF-8" : "UTF-16";
+            aster_printf("HiFi LRC parsed: %u cues (%s)", lyrics.count, name);
+            if (numeric_title(lyrics.title))
+                aster_printf("HiFi ignored numeric LRC title: %s", lyrics.title);
+        }
+    }
+    dirty = true;
+}
+
+static uint32_t position(void)
+{
+    return seeking != SEEK_IDLE ? seek_position : player.position_ms;
+}
+
+static void lyrics_tick(uint32_t now)
+{
+    lyrics_read();
+    int next = lrc_active(&lyrics, position());
+    if (lyric_line != next) {
+        lyric_animating = page == LYRICS && seeking == SEEK_IDLE && lyric_line >= 0 &&
+            next > lyric_line && lyrics.cue[next-1].time_ms == lyrics.cue[lyric_line].time_ms;
+        lyric_scroll = now;
+        lyric_line = next;
+        if (page == LYRICS) dirty = true;
+    }
+    if (lyric_animating) {
+        if (now - lyric_scroll >= 240) lyric_animating = false;
+        if (page == LYRICS) dirty = true;
+    }
+}
+
+static void set_page(enum page target)
+{
+    if (page == target) return;
+    if (page == PAPER || target == PAPER) {
+        uint32_t now = aster_time_now_ms();
+        memset(&shake, 0, sizeof(shake));
+        shake_after = now + 800;
+        paper_line = -1;
+        paper_previous = paper_style = paper_sung = 0;
+        paper_began = now;
+    }
+    page = target;
+    lyric_animating = false;
+    if (target == LIBRARY && library_scanned && !track_count) scan_start();
+    dirty = true;
+}
+
+static void shake_poll(uint32_t now)
+{
+    if (!imu_available || page == PAPER || finger.down || (int32_t)(now-shake_after) < 0) return;
+    aster_imu_sample_t sample = {.size = sizeof(sample), .version = 1};
+    if (aster_imu_read(&sample, sizeof(sample)) < 0 || !(sample.flags & ASTER_IMU_ACCEL_VALID) ||
+        sample.sequence == imu_sequence) return;
+    imu_sequence = sample.sequence;
+    if (shake_update(&shake, sample.accel, now)) {
+        aster_printf("HiFi paper lyrics: shake detected");
+        set_page(PAPER);
+    }
+}
+
+static const char *source_label(void)
+{
+    if (bluetooth_input()) return "蓝牙接收";
+    if (player.flags & ASTER_PLAYER_F_BT_OUTPUT) return "蓝牙输出";
+    return "有线";
+}
+
+static const char *playback_state(void)
+{
+    if (player.state == ASTER_PLAYER_PLAYING) return "正在播放";
+    if (player.state == ASTER_PLAYER_PAUSED) return "已暂停";
+    if (player.state == ASTER_PLAYER_OPENING) return "正在读取";
+    if (player.state == ASTER_PLAYER_STOPPING) return "正在切换";
+    if (player.state == ASTER_PLAYER_ENDED) return "已播放完毕";
+    if (player.state == ASTER_PLAYER_ERROR) return "无法播放";
+    return bluetooth_input() ? "等待手机连接" : "本地播放";
+}
+
+static void frame_chrome(void)
+{
+    if (page != PLAYBACK) aster_ge_clear(&gfx, background);
+    if (page == LYRICS) return;
+    if (page == LIBRARY) {
+        text(22, 17, 173, 24, ink, "本地曲库", LEFT);
+        text(260, 20, 109, 18, muted, source_label(), RIGHT);
+        box(386, 9, 55, 46, 12, finger.control == CLOSE ? panel : chrome, false);
+    }
+    line(405, 23, 423, 41, muted);
+    line(423, 23, 405, 41, muted);
+}
+
+static void clock_text(char out[24], uint32_t ms)
+{
+    uint32_t secs = ms / 1000;
+    aster_snprintf(out, 24, "%02u:%02u", secs/60, secs%60);
+}
+
+static void progress(int y, bool compact)
+{
+    int bar_height = compact ? 6 : 9;
+    int time_y = y + (compact ? 24 : 16);
+    int time_size = compact ? 16 : 18;
+    box(PROGRESS_X, y, PROGRESS_W, bar_height, bar_height/2, rail, false);
+    if (player.duration_ms) {
+        uint32_t now = position();
+        if (now > player.duration_ms) now = player.duration_ms;
+        int fill = (int)((uint64_t)now * PROGRESS_W / player.duration_ms);
+        if (fill) box(PROGRESS_X, y, fill, bar_height, bar_height/2, gold, false);
+        circle(PROGRESS_X+fill, y+bar_height/2, compact ? 7 : 11, gold);
+        char time[24];
+        clock_text(time, now);
+        text(32, time_y, 145, time_size, seeking != SEEK_IDLE ? gold : ink, time, LEFT);
+        clock_text(time, player.duration_ms);
+        text(283, time_y, 145, time_size, muted, time, RIGHT);
+    } else {
+        text(32, time_y, 145, time_size, muted, "--:--", LEFT);
+        text(283, time_y, 145, time_size, muted, "--:--", RIGHT);
+    }
+}
+
+static void fallback_art(uint16_t base)
+{
+    aster_ge_clear(&gfx, base);
+    int cx = left + sx(217), cy = top + sy(109);
+    for (int i = 11; i >= 0; i--) {
+        uint16_t glow = cover_mix(base, RGB(43,110,150), 170-i*13);
+        aster_ge_ellipse(&gfx, cx+sx(i*3), cy, sx(27+i*12), sy(15+i*5), glow, 0);
+    }
+    for (int i = 0; i < 11; i++) {
+        uint16_t edge = cover_mix(RGB(160,211,239), base, 35+i*13);
+        aster_ge_ellipse(&gfx, left+sx(185+i*6), cy, sx(26+i*12), sy(13+i*5), edge, 1);
+    }
+    circle(174, 105, 8, RGB(195,231,250));
+}
+
+static void playback_slider(int x, int y, int w, int fill, uint16_t track, uint16_t accent, bool knob)
+{
+    box(x, y, w, 4, 2, track, false);
+    if (fill) box(x, y, fill, 4, 2, accent, false);
+    if (knob) circle(x+fill, y+2, 6, accent);
+}
+
+static void playback(void)
+{
+    char name[256], parameters[48];
+    uint16_t base = RGB(14,26,40), accent = RGB(157,218,248);
+    uint16_t tray = RGB(24,43,63);
+    uint16_t key = cover_mix(base, accent, 34), track = cover_mix(base, accent, 67);
+    uint16_t subtitle = cover_mix(ink, base, 58);
+    if (cover_paint(surface, left, top, content_w, base, accent))
+        aster_ge_touch(&gfx, 0, 0, width, height);
+    else fallback_art(base);
+    text(25, 224, 235, 32, ink, title(name), LEFT);
+    const char *by = artist();
+    text(27, 266, 270, 16, subtitle, *by ? by : source_label(), LEFT);
+
+    if (player.rate) {
+        const char *codec = bluetooth_input() ? "SBC" : format(player.path);
+        if (*codec) aster_snprintf(parameters, sizeof(parameters), "%s/%uHz/%ubit", codec, player.rate, player.bits);
+        else aster_snprintf(parameters, sizeof(parameters), "%uHz/%ubit", player.rate, player.bits);
+        text(264, 234, 171, 14, subtitle, parameters, RIGHT);
+    } else text(264, 233, 171, 16, subtitle, playback_state(), RIGHT);
+    line(26, 291, 435, 291, track);
+    text(27, VOLUME_Y-8, 47, 14, subtitle, "音量", LEFT);
+    playback_slider(VOLUME_X, VOLUME_Y, VOLUME_W, volume * VOLUME_W / 100, track, accent, true);
+
+    char stamp[24];
+    uint32_t pos = position() < player.duration_ms ? position() : player.duration_ms;
+    if (player.duration_ms) clock_text(stamp, pos);
+    text(25, 348, 153, 48, seeking != SEEK_IDLE ? accent : ink,
+         player.duration_ms ? stamp : "--:--", LEFT);
+    if (player.duration_ms) clock_text(stamp, player.duration_ms);
+    text(177, 376, 60, 14, subtitle, player.duration_ms ? stamp : "--:--", RIGHT);
+    int fill = player.duration_ms ? (uint64_t)pos * PLAY_SEEK_W / player.duration_ms : 0;
+    playback_slider(PLAY_SEEK_X, PLAY_PROGRESS, PLAY_SEEK_W, fill, track, accent, player.duration_ms != 0);
+
+    box(PANEL_X, PANEL_Y, PANEL_W, PANEL_H, 19, tray, false);
+    box(STEP_X, STEP_UP, STEP_W, STEP_H, 12, finger.control == PREVIOUS ? track : key, false);
+    box(STEP_X, STEP_DOWN, STEP_W, STEP_H, 12, finger.control == NEXT ? track : key, false);
+    box(TOGGLE_X, STEP_UP, TOGGLE_W, STEP_DOWN+STEP_H-STEP_UP, 15,
+        finger.control == TOGGLE ? ink : accent, false);
+    int cx = STEP_X + STEP_W/2, prev_y = STEP_UP + STEP_H/2, next_y = STEP_DOWN + STEP_H/2;
+    box(cx-12, prev_y-10, 3, 20, 1, ink, false);
+    triangle(cx-6, prev_y, cx+11, prev_y-10, cx+11, prev_y+10, ink);
+    triangle(cx-11, next_y-10, cx+6, next_y, cx-11, next_y+10, ink);
+    box(cx+9, next_y-10, 3, 20, 1, ink, false);
+    cx = TOGGLE_X + TOGGLE_W/2;
+    int cy = PANEL_Y + PANEL_H/2;
+    if (player.state == ASTER_PLAYER_PLAYING) {
+        box(cx-10, cy-15, 7, 30, 2, base, false);
+        box(cx+3, cy-15, 7, 30, 2, base, false);
+    } else triangle(cx-9, cy-16, cx+15, cy, cx-9, cy+16, base);
+}
+
+static int next_lyric_group(int first)
+{
+    int next = first + 1;
+    while (next < (int)lyrics.count && lyrics.cue[next].time_ms == lyrics.cue[first].time_ms) next++;
+    return next;
+}
+
+static int previous_lyric_group(int first)
+{
+    int prior = first - 1;
+    while (prior > 0 && lyrics.cue[prior].time_ms == lyrics.cue[prior-1].time_ms) prior--;
+    return prior;
+}
+
+struct lyric_row { const char *start; uint32_t length; };
+
+static int wrap_lyric(int first, int end, int size, struct lyric_row *rows, int limit)
+{
+    int count = 0;
+    for (int cue = first; cue < end; cue++) {
+        const char *body = lyrics.text + lyrics.cue[cue].text_offset;
+        uint32_t length = strlen(body);
+        while (length) {
+            if (count == limit) return count + 1;
+            uint32_t shown;
+            uint32_t consumed = aster_text_line(size, body, length, sx(400), &shown);
+            if (!consumed) return 0;
+            rows[count++] = (struct lyric_row){body, shown};
+            length -= consumed;
+            body += consumed;
+        }
+    }
+    return count;
+}
+
+struct active_lyric {
+    struct lyric_row rows[6];
+    int count, size, step;
+    bool clipped;
+};
+
+static struct active_lyric measure_active_lyric(int focus)
+{
+    static const int roles[] = {32, 28, 24, 20, 18};
+    struct active_lyric block = {0};
+    int next = next_lyric_group(focus);
+    for (unsigned i = 0; i < sizeof(roles)/sizeof(roles[0]); i++) {
+        block.size = font(roles[i]);
+        block.step = aster_text_line_h(block.size);
+        int limit = clamp(sy(128)/block.step, 1, sizeof(block.rows)/sizeof(block.rows[0]));
+        int count = wrap_lyric(focus, next, block.size, block.rows, limit);
+        block.count = clamp(count, 0, limit);
+        block.clipped = count > limit;
+        if (!block.clipped) break;
+    }
+    return block;
+}
+
+static void draw_active_lyric(const struct active_lyric *block, int y)
+{
+    for (int i = 0; i < block->count; i++, y += block->step) {
+        char value[768];
+        const struct lyric_row *row = &block->rows[i];
+        if (block->clipped && i == block->count-1) {
+            aster_text_elide(block->size, row->start, strlen(row->start), sx(400), value, sizeof(value));
+        } else {
+            memcpy(value, row->start, row->length);
+            value[row->length] = 0;
+        }
+        text_run(30, y, 400, block->size, lyric_accent, value, LEFT);
+    }
+}
+
+static const char *lyric_preview(int first)
+{
+    int end = next_lyric_group(first);
+    for (int i = first; i < end; i++) {
+        const char *line = lyrics.text + lyrics.cue[i].text_offset;
+        if (*line) return line;
+    }
+    return NULL;
+}
+
+static void draw_context_lyric(const char *value, int y, int size, uint16_t color)
+{
+    char shown[224];
+    aster_text_elide(size, value, strlen(value), sx(400), shown, sizeof(shown));
+    text_run(30, y, 400, size, color, shown, LEFT);
+}
+
+static void lyric_scroll_view(int top_y, uint32_t now)
+{
+    enum { CONTEXT_LIMIT = 12 };
+    const char *prior[CONTEXT_LIMIT], *after[CONTEXT_LIMIT];
+    int prior_count = 0, after_count = 0;
+    int top_px = sy(top_y), bottom = sy(LYRIC_SEEK_TOP-8);
+    int size = font(20), line_h = aster_text_line_h(size), gap = sy(6);
+    int step = line_h + gap;
+    for (int i = lyric_line < 0 ? -1 : previous_lyric_group(lyric_line);
+         i >= 0 && prior_count < CONTEXT_LIMIT; i = previous_lyric_group(i)) {
+        const char *value = lyric_preview(i);
+        if (value) prior[prior_count++] = value;
+    }
+    for (int i = lyric_line < 0 ? 0 : next_lyric_group(lyric_line);
+         i < (int)lyrics.count && after_count < CONTEXT_LIMIT; i = next_lyric_group(i)) {
+        const char *value = lyric_preview(i);
+        if (value) after[after_count++] = value;
+    }
+
+    struct active_lyric active = {0};
+    if (lyric_line >= 0) active = measure_active_lyric(lyric_line);
+    int height = active.count * active.step;
+    int anchor = top_px;
+    if (lyric_line >= 0) {
+        int upper = clamp(top_px + prior_count*step, top_px, bottom-height);
+        int lower = clamp(bottom-height-after_count*step-gap, top_px, upper);
+        anchor = clamp((top_px+bottom-height)/2, lower, upper);
+        if (lyric_animating) {
+            int remaining = 240 - (int)(now - lyric_scroll);
+            if (remaining > 0) {
+                int delta = (step + (height-line_h)/2) * remaining * remaining / (240*240);
+                anchor = clamp(anchor + delta, top_px, bottom-height);
+            }
+        }
+        draw_active_lyric(&active, anchor);
+    }
+    for (int i = 0; i < prior_count; i++) {
+        int y = anchor - (i+1)*step;
+        if (y < top_px) break;
+        draw_context_lyric(prior[i], y, size, i < 2 ? muted : RGB(116,124,135));
+    }
+    int y = anchor + height + (height ? gap : 0);
+    for (int i = 0; i < after_count && y+line_h <= bottom; i++, y += step)
+        draw_context_lyric(after[i], y, size, i < 2 ? muted : RGB(116,124,135));
+}
+
+static void lyric_page(uint32_t now)
+{
+    char name[256];
+    const char *by = artist();
+    text(30, 18, 400, 24, ink, title(name), LEFT);
+    text(30, 49, 400, 16, muted, by, LEFT);
+    if (!lyrics.count) {
+        const char *heading = bluetooth_input() ? "手机音频暂无本地歌词" :
+            lyric_file ? "正在读取歌词" : lyric_error ? "无法读取歌词文件" : "暂无同步歌词";
+        text(30, 207, 400, 24, ink, heading, LEFT);
+        if (!bluetooth_input() && !lyric_file)
+            text(30, 249, 400, 20, muted, "将同名 LRC 放在歌曲旁边", LEFT);
+    } else {
+        lyric_scroll_view(*by ? 84 : 65, now);
+    }
+    progress(LYRIC_PROGRESS, true);
+}
+
+static void paper_tick(uint32_t now)
+{
+    if (page != PAPER) return;
+    int next = lyric_line;
+    while (next >= 0 && !lyrics.text[lyrics.cue[next].text_offset]) {
+        int following = next+1;
+        if (following >= (int)lyrics.count || lyrics.cue[following].time_ms != lyrics.cue[next].time_ms) {
+            next = -1;
+            break;
+        }
+        next = following;
+    }
+    if (next != paper_line) {
+        paper_previous = paper_style;
+        paper_style = next < 0 ? 0u : (unsigned)next % 3;
+        paper_began = now;
+        paper_line = next;
+        dirty = true;
+    }
+    unsigned sung = next < 0 ? 0 : lrc_sung_bytes(&lyrics, (unsigned)next, position());
+    if (sung != paper_sung || now-paper_began <= PAPER_TURN_MS+50) dirty = true;
+    paper_sung = sung;
+}
+
+static void draw_paper(uint32_t now)
+{
+    const char *body = paper_line < 0 ? NULL : lyrics.text + lyrics.cue[paper_line].text_offset;
+    const char *status = lyrics.count ? NULL : bluetooth_input() ? "手机音频暂无本地歌词" :
+        lyric_file ? "正在读取歌词" : lyric_error ? "无法读取歌词文件" : "暂无同步歌词";
+    paper_draw(&gfx, left, top, content_w, paper_style, paper_previous, now-paper_began,
+               body, paper_sung, status);
+}
+
+static int current_index(void)
+{
+    if (bluetooth_input()) return -1;
+    const char *base = basename_of(player.path[0] ? player.path : current_file);
+    for (int i = 0; i < track_count; i++) if (!strcmp(base, tracks[i])) return i;
+    return -1;
+}
+
+static int page_count(void) { return track_count ? (track_count + ROWS - 1)/ROWS : 1; }
+
+static void library(void)
+{
+    char temp[256];
+    if (!library_scanned) aster_snprintf(temp, sizeof(temp), "正在读取 SD / music");
+    else aster_snprintf(temp, sizeof(temp), "SD / music · %d 首", track_count);
+    text(25, 71, 252, 18, muted, temp, LEFT);
+    box(305, 59, 130, 44, 10, finger.control == DEMO ? rim : panel, false);
+    text(305, 68, 130, 20, gold, "试听示例", CENTER);
+    int active = current_index();
+    for (int row = 0; row < ROWS; row++) {
+        int index = library_page * ROWS + row, y = ROW_TOP + row * ROW_H;
+        if (index >= track_count) break;
+        if (active == index || finger.control == TRACK_FIRST + row)
+            box(19, y+2, 422, ROW_H-5, 10, selected, false);
+        else line(22, y+ROW_H-2, 438, y+ROW_H-2, rail);
+        aster_snprintf(temp, sizeof(temp), "%02d", index+1);
+        text(33, y+18, 45, 18, gold, temp, LEFT);
+        display_name(tracks[index], temp);
+        text(77, y+13, 260, 24, ink, temp, LEFT);
+        text(351, y+19, 69, 18, muted, format(tracks[index]), RIGHT);
+    }
+    if (!track_count && library_scanned) {
+        text(26, 200, 408, 19, ink, scan_error < 0 && scan_error != ASTER_ENOENT ?
+             "无法打开存储卡曲库" : "曲库暂无音乐", CENTER);
+        text(26, 236, 408, 16, muted, "将 MP3、FLAC 或 WAV 放入 music 目录", CENTER);
+    }
+    uint16_t prev = library_page > 0 ? gold : border;
+    uint16_t next = library_page+1 < page_count() ? gold : border;
+    box(18, LIBRARY_PAGER+6, 126, 47, 10, chrome, false);
+    box(316, LIBRARY_PAGER+6, 126, 47, 10, chrome, false);
+    text(18, LIBRARY_PAGER+17, 126, 20, prev, "上一页", CENTER);
+    text(316, LIBRARY_PAGER+17, 126, 20, next, "下一页", CENTER);
+    aster_snprintf(temp, sizeof(temp), "%d / %d", library_page+1, page_count());
+    text(158, LIBRARY_PAGER+17, 144, 20, ink, temp, CENTER);
+}
+
+static void draw(uint32_t now)
+{
+    switch (page) {
+    case LYRICS: frame_chrome(); lyric_page(now); break;
+    case PLAYBACK: playback(); frame_chrome(); break;
+    case LIBRARY: frame_chrome(); library(); break;
+    case PAPER: draw_paper(now); break;
+    }
+    if (page != PAPER && message[0]) {
+        box(32, 271, 396, 47, 11, panel, false);
+        box(32, 271, 396, 47, 11, border, true);
+        text(44, 283, 372, 18, ink, message, CENTER);
+    }
+    int result = aster_ge_present(&gfx);
+    if (result < 0) aster_errfmt("HiFi render %d", result);
+}
+
+static int hit(int x, int y)
+{
+    if (page == PAPER) return NONE;
+    if (page != LYRICS && y >= 4 && y < HEADER_END && x >= 378 && x < DESIGN) return CLOSE;
+    if (page == LIBRARY) {
+        if (y >= HEADER_END && y < ROW_TOP && x >= 288 && x < DESIGN) return DEMO;
+        if (y >= ROW_TOP && y < LIBRARY_PAGER && x >= 8 && x < DESIGN-8)
+            return TRACK_FIRST+(y-ROW_TOP)/ROW_H;
+        if (y >= LIBRARY_PAGER && y < CONTENT_END && x >= 0 && x < 150) return PAGE_PREV;
+        if (y >= LIBRARY_PAGER && y < CONTENT_END && x >= 310 && x < DESIGN) return PAGE_NEXT;
+        return NONE;
+    }
+    if (page == LYRICS && y >= LYRIC_SEEK_TOP && y < CONTENT_END) return SEEK;
+    if (page == PLAYBACK) {
+        if (x >= 19 && x < PANEL_X-7) {
+            if (y >= VOLUME_Y-20 && y < VOLUME_Y+20) return VOLUME;
+            if (y >= PLAY_PROGRESS-25 && y < PLAY_PROGRESS+25) return SEEK;
+        }
+        if (x >= STEP_X && x < STEP_X+STEP_W) {
+            if (y >= STEP_UP && y < STEP_UP+STEP_H) return PREVIOUS;
+            if (y >= STEP_DOWN && y < STEP_DOWN+STEP_H) return NEXT;
+        }
+        if (x >= TOGGLE_X && x < TOGGLE_X+TOGGLE_W && y >= STEP_UP && y < STEP_DOWN+STEP_H)
+            return TOGGLE;
+    }
+    return NONE;
+}
+
+static bool page_swipe_area(int y)
+{
+    if (page == PAPER) return y >= 24 && y < DESIGN-24;
+    if (page == PLAYBACK) return y >= 24 && y < PANEL_Y-5;
+    return y >= HEADER_END && y < (page == LYRICS ? LYRIC_SEEK_TOP : LIBRARY_PAGER);
+}
+
+static uint32_t output(void)
+{
+    aster_player_bt_list_t list = {.size = sizeof(list), .version = 1};
+    if (!aster_player_bt_list(&list, sizeof(list)) &&
+        list.state == ASTER_PLAYER_BT_CONNECTED && list.output_rate)
+        return ASTER_PLAYER_OUTPUT_BLUETOOTH;
+    return ASTER_PLAYER_OUTPUT_WIRED;
+}
+
+static bool media_in_use(void)
+{
+    return player.state == ASTER_PLAYER_PLAYING || player.state == ASTER_PLAYER_PAUSED ||
+        player.state == ASTER_PLAYER_OPENING || player.state == ASTER_PLAYER_STOPPING;
+}
+
+static void queue_track(const char *path)
+{
+    if (bluetooth_input()) { notice("请先在系统蓝牙中断开手机"); return; }
+    seeking = SEEK_IDLE;
+    if (path != current_file) aster_snprintf(current_file, sizeof(current_file), "%s", path);
+    if (media_in_use()) {
+        aster_snprintf(queued_file, sizeof(queued_file), "%s", path);
+        if (player.state != ASTER_PLAYER_STOPPING && control(ASTER_PLAYER_STOP, 0, NULL) < 0)
+            queued_file[0] = 0;
+    } else control(ASTER_PLAYER_PLAY_FILE, output(), path);
+    set_page(PLAYBACK);
+    dirty = true;
+}
+
+static void play_index(int index)
+{
+    if (index < 0 || index >= track_count) return;
+    char path[256];
+    aster_snprintf(path, sizeof(path), "/music/%s", tracks[index]);
+    queue_track(path);
+}
+
+static void change_library_page(int step)
+{
+    library_page = clamp(library_page+step, 0, page_count()-1);
+    dirty = true;
+}
+
+static void activate(int id)
+{
+    switch (id) {
+    case CLOSE: aster_app_exit(0); break;
+    case DEMO: queue_track("/assets/audio/demo.flac"); break;
+    case PAGE_PREV: change_library_page(-1); break;
+    case PAGE_NEXT: change_library_page(1); break;
+    case TOGGLE:
+        if (!bluetooth_input() && !media_in_use()) {
+            const char *track = sandbox_track(player.path);
+            if (*track) queue_track(track);
+            else if (current_file[0]) queue_track(current_file);
+            else set_page(LIBRARY);
+        } else if (player.state == ASTER_PLAYER_PLAYING) control(ASTER_PLAYER_PAUSE, 0, NULL);
+        else control(ASTER_PLAYER_RESUME, 0, NULL);
+        break;
+    case PREVIOUS: case NEXT:
+        if (bluetooth_input()) {
+            control(id == PREVIOUS ? ASTER_PLAYER_PREVIOUS : ASTER_PLAYER_NEXT, 0, NULL);
+        } else if (track_count) {
+            int index = current_index();
+            play_index(index < 0 ? 0 : (index + (id == NEXT ? 1 : track_count-1)) % track_count);
+        } else set_page(LIBRARY);
+        break;
+    default:
+        if (id >= TRACK_FIRST && id < TRACK_FIRST+ROWS)
+            play_index(library_page*ROWS + id-TRACK_FIRST);
+        break;
+    }
+    dirty = true;
+}
+
+static void slider(int id, int x)
+{
+    if (id == VOLUME) {
+        int next = clamp((x - VOLUME_X) * 100 / VOLUME_W, 0, 100);
+        if (volume != next && aster_audio_set_volume(next) >= 0) volume = next;
+    } else if (!bluetooth_input() && player.duration_ms) {
+        int start = page == PLAYBACK ? PLAY_SEEK_X : PROGRESS_X;
+        int span = page == PLAYBACK ? PLAY_SEEK_W : PROGRESS_W;
+        seek_position = (uint32_t)((uint64_t)player.duration_ms *
+            clamp(x - start, 0, span) / span);
+        seeking = SEEK_DRAG;
+    }
+    dirty = true;
+}
+
+static void touch(const aster_event_t *event)
+{
+    int x = ((int)event->u.touch.x-left)*DESIGN/(int)content_w;
+    int y = ((int)event->u.touch.y-top)*DESIGN/(int)content_h;
+    uint32_t action = event->u.touch.action;
+    if (action == ASTER_TOUCH_DOWN) {
+        finger.down = true;
+        finger.moved = finger.rejected = false;
+        finger.x = x;
+        finger.y = y;
+        finger.control = hit(x, y);
+        finger.page_swipe = page_swipe_area(y) && finger.control != VOLUME && finger.control != DEMO;
+        if (finger.control == SEEK) slider(SEEK, x);
+        dirty = true;
+        return;
+    }
+    if (!finger.down) return;
+    int dx = x - finger.x, dy = y - finger.y;
+    int ax = abs_i(dx), ay = abs_i(dy);
+    int id = finger.control;
+    bool is_slider = id == VOLUME || id == SEEK;
+    if (!page_swipe_area(y)) finger.page_swipe = false;
+    if (ax > 12 || ay > 12) {
+        if (!finger.moved && is_slider && ay > ax * 2) {
+            finger.rejected = true;
+            if (id == SEEK && seeking == SEEK_DRAG) seeking = SEEK_IDLE;
+            dirty = true;
+        }
+        finger.moved = true;
+    }
+    if (action == ASTER_TOUCH_MOVE) {
+        if (is_slider && !finger.rejected && finger.moved) slider(id, x);
+        return;
+    }
+    if (action != ASTER_TOUCH_UP) return;
+    finger.down = false;
+    finger.control = NONE;
+    if (is_slider && !finger.rejected) {
+        slider(id, x);
+        if (id == SEEK && seeking == SEEK_DRAG) {
+            if (control(ASTER_PLAYER_SEEK, seek_position, NULL) >= 0) {
+                seeking = SEEK_WAIT;
+                seek_deadline = aster_time_now_ms()+2000;
+            } else seeking = SEEK_IDLE;
+        }
+    } else if (!is_slider && finger.page_swipe && ax >= 46 && ax * 2 > ay * 3) {
+        if (page == PAPER) {
+            if (dx < 0) set_page(PLAYBACK);
+        } else set_page((enum page)clamp((int)page+(dx < 0 ? 1 : -1), LYRICS, LIBRARY));
+    } else if (page == LIBRARY && ay >= 42 && ay * 2 > ax * 3 && finger.y >= 110) {
+        change_library_page(dy < 0 ? 1 : -1);
+    } else if (!finger.moved && id != NONE && hit(x, y) == id) activate(id);
+    dirty = true;
+}
+
+static void poll(uint32_t now)
+{
+    if (now - last_poll < (page == PAPER ? 50u : 150u)) return;
+    last_poll = now;
+    aster_player_info_t next = {.size = sizeof(next), .version = 1};
+    if (!aster_player_get_info(&next, sizeof(next))) {
+        player.position_ms = next.position_ms;
+        memcpy(player.reserved, next.reserved, sizeof(player.reserved));
+        if (memcmp(&next, &player, sizeof(next))) dirty = true;
+        if (player.mode != next.mode) {
+            queued_file[0] = 0;
+            seeking = SEEK_IDLE;
+            finger.down = false;
+            finger.control = NONE;
+        }
+        player = next;
+        if (seeking == SEEK_WAIT) {
+            uint32_t delta = player.position_ms > seek_position ?
+                player.position_ms-seek_position : seek_position-player.position_ms;
+            if (delta <= 450 || (int32_t)(now-seek_deadline) >= 0 ||
+                player.state == ASTER_PLAYER_ERROR) {
+                seeking = SEEK_IDLE;
+                dirty = true;
+            }
+        }
+    }
+    lyrics_track(bluetooth_input() ? "" : sandbox_track(player.path));
+    cover_select(bluetooth_input() ? "" : sandbox_track(player.path));
+    int next_volume = aster_audio_get_volume();
+    if (next_volume >= 0 && next_volume != volume) {
+        volume = clamp(next_volume, 0, 100);
+        dirty = true;
+    }
+    if (queued_file[0] && !bluetooth_input() && !media_in_use()) {
+        control(ASTER_PLAYER_PLAY_FILE, output(), queued_file);
+        queued_file[0] = 0;
+    }
+}
+
+ASTER_APP_EXPORT int aster_app_init(void)
+{
+    aster_display_info_t display = {.size = sizeof(display), .version = 1};
+    int result = aster_display_get_info(0, &display, sizeof(display));
+    if (result < 0) return result;
+    width = display.app_width;
+    height = display.app_height;
+    if (width < 240 || height < 240) return ASTER_ENOTSUP;
+    content_w = content_h = width < height ? width : height;
+    left = (width-content_w)/2;
+    top = (height-content_h)/2;
+    player = (aster_player_info_t){.size = sizeof(player), .version = 1};
+    result = aster_player_get_info(&player, sizeof(player));
+    if (result < 0) return result;
+    int initial_volume = aster_audio_get_volume();
+    volume = initial_volume < 0 ? 40 : clamp(initial_volume, 0, 100);
+    aster_surface_desc_t desc = {
+        .size = sizeof(desc), .version = 1, .width = width, .height = height, .format = ASTER_PIXEL_RGB565
+    };
+    result = aster_surface_create(&desc, sizeof(desc), &surface);
+    if (result < 0) return result;
+    aster_ge_init(&gfx, surface, width, height, commands, 160, arena, sizeof(arena));
+    scan_start();
+    lyrics_track(bluetooth_input() ? "" : sandbox_track(player.path));
+    cover_select(bluetooth_input() ? "" : sandbox_track(player.path));
+    aster_imu_info_t imu = {.size = sizeof(imu), .version = 1};
+    imu_available = !aster_imu_get_info(&imu, sizeof(imu)) && (imu.flags & ASTER_IMU_ACCEL_VALID);
+    aster_app_set_framerate(30);
+    dirty = true;
+    aster_printf("HiFi init %ux%u caps=%u shake=%u", width, height, player.capabilities, imu_available ? 1u : 0u);
+    return 0;
+}
+
+ASTER_APP_EXPORT void aster_app_event(const aster_event_t *event)
+{
+    if (!event || !surface) return;
+    if (event->type == ASTER_EVENT_FRAME) {
+        uint32_t now = aster_time_now_ms();
+        poll(now);
+        shake_poll(now);
+        scan_tick();
+        lyrics_tick(now);
+        paper_tick(now);
+        if (cover_tick(sx(208)) && page == PLAYBACK) dirty = true;
+        uint32_t second = position()/1000;
+        if (visible_second != second) {
+            visible_second = second;
+            if (page != LIBRARY && page != PAPER) dirty = true;
+        }
+        if (message[0] && (int32_t)(now-message_until) >= 0) { message[0] = 0; dirty = true; }
+        if (aster_gfx_fonts_pending()) dirty = true;
+        if (dirty) { draw(now); dirty = false; }
+    } else if (event->type == ASTER_EVENT_TOUCH && event->u.touch.slot == 0) touch(event);
+    else if (event->type == ASTER_EVENT_KEY && event->u.key.pressed && event->u.key.code == 1)
+        aster_app_exit(0);
+}
+
+ASTER_APP_EXPORT void aster_app_pause(void)
+{
+    memset(&finger, 0, sizeof(finger));
+    memset(&shake, 0, sizeof(shake));
+    seeking = SEEK_IDLE;
+}
+ASTER_APP_EXPORT void aster_app_resume(void)
+{
+    aster_app_pause();
+    last_poll = 0;
+    dirty = true;
+}
+static void cleanup(void)
+{
+    scan_close();
+    lyrics_close();
+    cover_close();
+    if (surface) { aster_surface_destroy(surface); surface = 0; }
+}
+ASTER_APP_EXPORT void aster_app_stop(void) { cleanup(); }
+ASTER_APP_EXPORT void aster_app_destroy(void) { cleanup(); }

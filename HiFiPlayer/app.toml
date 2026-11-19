@@ -1,8 +1,8 @@
 [app]
 id = "aster.hifi"
 name = "Aster 音乐"
-description = "本地无损音乐与蓝牙接收，支持后台播放和手机播放控制。"
-version = "0.3.3"
+description = "滑动切换播放、同步歌词和曲库，支持本地音乐与蓝牙音频。"
+version = "0.4.10"
 abi = "4.5.0"
 abi_min = "4.5"
 aot = true
@@ -15,9 +15,9 @@ max_memory = 2097152
 heap = 524288
 requires = ["display", "touch", "media-player"]
 permissions = ["fs"]
-sources = ["src/main.c"]
+sources = ["src/main.c", "src/lrc.c", "src/cover.c", "src/paper.c", "src/shake.c"]
 icon = "icon.bin"
-assets = ["audio/demo.flac"]
+assets = ["audio/demo.flac", "art/moonlight.bmp", "text/gbk.bin"]
 
 [sdk]
 target = "riscv"
