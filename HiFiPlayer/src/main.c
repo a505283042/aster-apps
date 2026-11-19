@@ -50,12 +50,13 @@ static void scan_close(void){if(dir){aster_fs_closedir(dir);dir=0;}scanning=0;}
 static void scan_start(void){
  scan_close();files=page=0;
  int r=aster_fs_opendir("/music",6,&dir);
- if(r<0){notice("将 WAV / FLAC 文件放入 SD 的 music 目录");dir=0;return;}
+ if(r<0){notice("将 MP3、WAV 或 FLAC 放入 SD 的 music 目录");dir=0;return;}
  scanning=1;
 }
 static int extension(const char *name){
  int n=(int)strlen(name);if(n<4)return 0;
  const char *p=name+n-4;
+ if(p[0]=='.' && (p[1]=='m'||p[1]=='M') && (p[2]=='p'||p[2]=='P') && p[3]=='3')return 1;
  if(p[0]=='.' && (p[1]=='w'||p[1]=='W') && (p[2]=='a'||p[2]=='A') && (p[3]=='v'||p[3]=='V'))return 1;
  if(n<5)return 0;
  p=name+n-5;
@@ -101,7 +102,7 @@ static void draw(void){
  aster_snprintf(line,sizeof(line),"%u%%",volume);
  text(369,71,16,white,line,61);
  if(library && mode==ASTER_PLAYER_LOCAL){
-  text(22,110,14,muted,"SD / music · WAV / FLAC",310);button(5,338,104,106,36,"试听示例",0);
+  text(22,110,14,muted,"SD / music · MP3 / WAV / FLAC",310);button(5,338,104,106,36,"试听示例",0);
   for(int i=0;i<4;i++){
    int index=page*4+i;if(index>=files)break;
    rect(16,150+i*51,428,44,pressed==20+i?0x2948:panel,8);
