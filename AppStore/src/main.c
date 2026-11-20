@@ -35,6 +35,7 @@ static aster_gfx_cmd_t commands[128];
 static uint8_t arena[4096];
 static char server[192] = STORE_URL, edit[192], target[16], query[256], url[1024], headers[160];
 static char static_base[192];
+static int extended_catalog;
 static uint32_t admission_started;
 static store_rate download_rate;
 static char custom_server[192];
@@ -353,6 +354,7 @@ static void refresh(void)
     catalog_ready = catalog_tail = 0;
     view = LIST;
     static_base[0] = 0;
+    extended_catalog = 0;
     size_t n = strlen(server);
     wanted = n >= 5 && equals(server + n - 5, ".json") ? SOURCE : CATALOG;
     message("正在获取兼容应用", 0);
@@ -379,6 +381,14 @@ static int read_catalog(void)
         if (text(0, "board", board, sizeof(board)) < 0 || !equals(board, device.board) ||
             text(0, "target", backend, sizeof(backend)) < 0 || !equals(backend, target))
             return -1;
+        uint32_t abi, flags;
+        if (!extended_catalog && catalog_page == 0 && !number(0, "extended_abi", &abi) &&
+            !number(0, "extended_features", &flags) && (device.abi_version >> 16) == (abi >> 16) &&
+            device.abi_version >= abi && (device.feature_flags & flags) == flags) {
+            extended_catalog = 1;
+            wanted = CATALOG;
+            return 0;
+        }
     }
     release_icons();
     int array = json_key(&doc, 0, "items");
@@ -505,29 +515,30 @@ static int verify_metadata(int object, const entry *e)
         if (!fit)
             return -1;
     }
-    static const char *names[23] = {"display",
-                                    "touch",
-                                    "mouse",
-                                    "keyboard",
-                                    "camera",
-                                    "audio-in",
-                                    "audio-out",
-                                    "wifi",
-                                    "bluetooth",
-                                    "accelerometer",
-                                    "gyroscope",
-                                    "filesystem",
-                                    "rtc",
-                                    "psram",
-                                    "framebuffer",
-                                    "network",
-                                    "http",
-                                    "tls",
-                                    "audio-stream",
-                                    "mqtt",
-                                    "websocket",
-                                    "audio-effects",
-                                    "audio-effects-memory"};
+    static const char *names[] = {"display",
+                                  "touch",
+                                  "mouse",
+                                  "keyboard",
+                                  "camera",
+                                  "audio-in",
+                                  "audio-out",
+                                  "wifi",
+                                  "bluetooth",
+                                  "accelerometer",
+                                  "gyroscope",
+                                  "filesystem",
+                                  "rtc",
+                                  "psram",
+                                  "framebuffer",
+                                  "network",
+                                  "http",
+                                  "tls",
+                                  "audio-stream",
+                                  "mqtt",
+                                  "websocket",
+                                  "audio-effects",
+                                  "audio-effects-memory",
+                                  [ASTER_FEATURE_MEDIA_PLAYER] = "media-player"};
     int needs = json_key(&doc, object, "requires");
     if (needs < 0 || doc.tokens[needs].type != '[')
         return -1;
@@ -537,8 +548,8 @@ static int verify_metadata(int object, const entry *e)
         if (json_string(&doc, at, name, sizeof(name)) < 0)
             return -1;
         int bit = -1;
-        for (int n = 0; n < 23; n++)
-            if (equals(names[n], name))
+        for (unsigned n = 0; n < sizeof(names) / sizeof(names[0]); n++)
+            if (names[n] && equals(names[n], name))
                 bit = n;
         if (equals(name, "storage.app"))
             bit = 11;
@@ -725,8 +736,8 @@ static int start_request(void)
         copystr(url, server);
     else if (active == CATALOG) {
         if (static_base[0])
-            aster_snprintf(url, sizeof(url), "%s/catalog-%s-%s-%d.json", static_base, device.board,
-                           target, catalog_page);
+            aster_snprintf(url, sizeof(url), "%s/catalog-%s%s-%s-%d.json", static_base,
+                           extended_catalog ? "extended-" : "", device.board, target, catalog_page);
         else
             aster_snprintf(url, sizeof(url), "%s/v1/catalog?%s&page=%d", server, query,
                            catalog_page);

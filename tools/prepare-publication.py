@@ -109,6 +109,7 @@ def main():
                         str(app),
                         '--target',
                         target,
+                        *(['--hardware', v['hardware']] if v.get('hardware') else []),
                         '--aot',
                     ],
                     env=environment | {'ASTER_WORKSPACE': str(app)},

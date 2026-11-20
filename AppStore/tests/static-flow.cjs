@@ -18,7 +18,7 @@ const resource = Buffer.alloc(65536, 37),
   payloads = [program, resource],
   release = '1'.repeat(64);
 const digest = data => crypto.createHash('sha256').update(data).digest('hex');
-let base, mode, hits;
+let base, mode, hits, extendedHits;
 const metadata = () => ({
   id: app.manifest.id,
   version: app.manifest.version,
@@ -26,7 +26,7 @@ const metadata = () => ({
   boards: [mode === 'wrong-board' ? 'wrong' : 'aster.simulator'],
   target: 'wasm',
   abi_min: [4, 1, 0],
-  requires: ['display', 'touch'],
+  requires: mode === 'good-media' ? ['display', 'touch', 'media-player'] : ['display', 'touch'],
   screens: [[480, 480]]
 });
 const server = http.createServer((req, res) => {
@@ -38,15 +38,20 @@ const server = http.createServer((req, res) => {
     );
     return;
   }
-  if (url.pathname.endsWith('/catalog-aster.simulator-wasm-0.json')) {
+  const extended = url.pathname.endsWith('/catalog-extended-aster.simulator-wasm-0.json');
+  if (extended || url.pathname.endsWith('/catalog-aster.simulator-wasm-0.json')) {
+    if (extended) extendedHits++;
     res.end(
       JSON.stringify({
         schema: 1,
         board: 'aster.simulator',
         target: 'wasm',
-        total: 1,
+        ...(!extended && ['good-media', 'good-no-media'].includes(mode)
+          ? { extended_abi: 0x040100, extended_features: 1 << 23 }
+          : {}),
+        total: mode === 'good-media' && !extended ? 0 : 1,
         next: -1,
-        items: [
+        items: mode === 'good-media' && !extended ? [] : [
           {
             ...metadata(),
             name: '静态资源测试',
@@ -111,8 +116,8 @@ const tap = (h, x, y) => {
 (async () => {
   await new Promise(r => server.listen(0, '127.0.0.1', r));
   base = `http://127.0.0.1:${server.address().port}`;
-  for (mode of ['good', 'good-legacy-url', 'good-busy', 'wrong-board', 'corrupt']) {
-    hits = 0;
+  for (mode of ['good', 'good-legacy-url', 'good-busy', 'good-media', 'good-no-media', 'wrong-board', 'corrupt']) {
+    hits = extendedHits = 0;
     const catalog = [pkg],
       memoryStorage = new MemoryFS();
     const h = new Host(pkg, {
@@ -123,6 +128,7 @@ const tap = (h, x, y) => {
       catalog,
       memoryStorage
     });
+    if (mode === 'good-media') h.features.add(23);
     if (mode === 'good-busy') {
       const open = h.netabi.open.bind(h.netabi);
       let attempts = 0;
@@ -150,6 +156,7 @@ const tap = (h, x, y) => {
       }
       if (mode.startsWith('good')) {
         assert(h.pendingInstall, JSON.stringify(h.logs));
+        assert.equal(extendedHits, mode === 'good-media' ? 1 : 0);
         assert.equal(hits, 2);
         h.stop();
         h.completeInstall();

@@ -1,0 +1,9 @@
+schema = 1
+id = "aster.hifi"
+
+[[variants]]
+target = "riscv"
+hardware = "fakepod-s31"
+package = "dist/riscv/fakepod-s31/aster.hifi.ast"
+boards = ["fakepod-s31"]
+screens = [[460, 460]]

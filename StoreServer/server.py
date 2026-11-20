@@ -49,6 +49,7 @@ FEATURES = {
     "websocket": 20,
     "audio-effects": 21,
     "audio-effects-memory": 22,
+    "media-player": 23,
 }
 
 
