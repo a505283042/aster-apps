@@ -141,14 +141,29 @@ static void build_lights(unsigned scene, const uint8_t *mask, int cell)
     struct light_map *map = &stage_lights[light_slot];
     map->scene = scene;
     uint16_t halo = tint(p->panel, p->pending, 36);
+    uint16_t shades[101];
+    float radius_limit[101], x_squared[LIGHT_MAP];
+    /* Invert the light curve once per shade. Along a scanline the intensity
+     * rises towards the centre and falls again, usually by one shade per cell. */
+    for (int i = 0; i <= 100; i++) {
+        float radius = (7.f - __builtin_sqrtf(1.f + .48f * i)) / 6.f;
+        radius_limit[i] = radius * radius;
+        shades[i] = tint(p->base, p->panel, i);
+    }
+    for (int x = 0; x < LIGHT_MAP; x++) {
+        int dx = 4 * x - center.x;
+        x_squared[x] = (float)(dx * dx) / (368 * 368);
+    }
     for (int y = 0; y < LIGHT_MAP; y++) {
+        int dy = 4 * y - center.y, power = 0;
+        float y_squared = (float)(dy * dy) / (285 * 285);
         for (int x = 0; x < LIGHT_MAP; x++) {
-            int dx = 4 * x - center.x, dy = 4 * y - center.y;
-            float radius =
-                __builtin_sqrtf((float)(dx * dx) / (368 * 368) + (float)(dy * dy) / (285 * 285));
-            float light = 1.f - unit(radius);
-            unsigned power = (unsigned)(100.f * light * (.25f + .75f * light));
-            uint16_t color = tint(p->base, p->panel, power);
+            float distance_squared = x_squared[x] + y_squared;
+            while (power < 100 && distance_squared <= radius_limit[power + 1])
+                power++;
+            while (power && distance_squared > radius_limit[power])
+                power--;
+            uint16_t color = shades[power];
             /* The ghost is tilted independently of the foreground lettering. */
             int u = 40 + ((4 * x - 276) * 72 - (4 * y - 222) * 23) / 275;
             int v = 40 + ((4 * x - 276) * 23 + (4 * y - 222) * 72) / 275;
@@ -424,27 +439,42 @@ static void wall_row(uint16_t *row, int lo, int hi, int y, int size, unsigned st
 #undef POLYGON
 }
 
-static void stage_row(uint16_t *row, int lo, int hi, int y, int size, unsigned style,
-                      unsigned previous, unsigned alpha)
+static void stage_background(const canvas_t *canvas, unsigned style, unsigned previous,
+                             unsigned alpha)
 {
     const struct light_map *front = &stage_lights[light_slot];
     const struct light_map *back = &stage_lights[light_slot ^ 1];
-    int v = y * LIGHT_MAP / size;
-    for (int x = lo; x < hi;) {
-        int u = x * LIGHT_MAP / size;
-        int end = min(hi, ((u + 1) * size + LIGHT_MAP - 1) / LIGHT_MAP);
-        uint16_t color =
-            front->scene == (int)style ? front->pixels[v][u] : rgb565(palettes[style].base);
-        if (alpha < 32 && previous != style && back->scene == (int)previous)
-            color = mix(back->pixels[v][u], color, alpha);
-        fill_span(row, x, end, color);
-        x = end;
-    }
-    int design_y = y * DESIGN / size;
-    for (unsigned i = 0; i < 3; i++) {
-        int h = (style % 3 == 2 ? 270 : 309) + 16 * (int)i;
-        crease(row, lo, hi, design_y, size, (point_t){0, h}, (point_t){460, h - 176},
-               tint(palettes[style].base, palettes[style].pending, 24 - 4 * i));
+    const palette_t *p = &palettes[style];
+    bool blend = alpha < 32 && previous != style && back->scene == (int)previous;
+    int size = canvas->extent, lo = canvas->x0, hi = canvas->x1;
+    uint16_t edges[3];
+    for (int i = 0; i < 3; i++)
+        edges[i] = tint(p->base, p->pending, 24 - 4 * i);
+    for (int y = canvas->y0; y < canvas->y1;) {
+        int v = y * LIGHT_MAP / size;
+        int bottom = min(canvas->y1, ((v + 1) * size + LIGHT_MAP - 1) / LIGHT_MAP);
+        uint16_t *row = canvas->pixels + y * canvas->stride;
+        for (int x = lo; x < hi;) {
+            int u = size == DESIGN ? x / 4 : x * LIGHT_MAP / size;
+            int edge = size == DESIGN ? (u + 1) * 4 : ((u + 1) * size + LIGHT_MAP - 1) / LIGHT_MAP;
+            uint16_t color = front->scene == (int)style ? front->pixels[v][u] : rgb565(p->base);
+            if (blend)
+                color = mix(back->pixels[v][u], color, alpha);
+            int end = min(hi, edge);
+            fill_span(row, x, end, color);
+            x = end;
+        }
+        /* Expand each light-map row once, including when repainting just a word. */
+        for (int next = y + 1; next < bottom; next++)
+            memcpy(canvas->pixels + next * canvas->stride + lo, row + lo, (hi - lo) * sizeof(*row));
+        for (; y < bottom; y++) {
+            row = canvas->pixels + y * canvas->stride;
+            for (int i = 0; i < 3; i++) {
+                int h = (style % 3 == 2 ? 270 : 309) + 16 * i;
+                crease(row, lo, hi, y * DESIGN / size, size, (point_t){0, h},
+                       (point_t){460, h - 176}, edges[i]);
+            }
+        }
     }
 }
 
@@ -453,7 +483,12 @@ static void backdrop(const canvas_t *canvas, unsigned style, unsigned previous, 
     int size = canvas->extent;
     int revealed[5];
     enum lyric_effect effect = style / LYRIC_VARIANTS;
-    int turn_ms = effect == CAMERA_PUSH ? 320 : effect == FOLD_PLANES ? 440 : PAPER_TURN_MS;
+    if (effect == CAMERA_PUSH) {
+        unsigned alpha = (unsigned)(32 * smooth((float)elapsed / CAMERA_MOVE_MS));
+        stage_background(canvas, style, previous, alpha);
+        return;
+    }
+    int turn_ms = effect == FOLD_PLANES ? 440 : PAPER_TURN_MS;
     float open = smooth((float)elapsed / turn_ms);
     for (unsigned band = 0; band < 5; band++)
         revealed[band] =
@@ -463,9 +498,7 @@ static void backdrop(const canvas_t *canvas, unsigned style, unsigned previous, 
         unsigned band = (unsigned)y * 5 / size;
         int span = revealed[band];
         int v = y * DESIGN / size;
-        if (effect == CAMERA_PUSH) {
-            stage_row(row, canvas->x0, canvas->x1, y, size, style, previous, (unsigned)(32 * open));
-        } else if (effect == FOLD_PLANES && style != previous && open < 1.f) {
+        if (effect == FOLD_PLANES && style != previous && open < 1.f) {
             int slope = style % 2 ? v - 230 : 230 - v;
             int edge =
                 max(0, min(size, (int)((-280 + 1080 * open + slope * .72f) * size / DESIGN)));
@@ -558,14 +591,14 @@ static void typeset(const canvas_t *canvas, unsigned style, uint32_t elapsed,
     const palette_t *p = &palettes[style];
     enum lyric_effect effect = style / LYRIC_VARIANTS;
     unsigned variant = style % LYRIC_VARIANTS;
-    float remain = 1.f - unit(elapsed / (effect == CAMERA_PUSH   ? 600.f
+    float remain = 1.f - unit(elapsed / (effect == CAMERA_PUSH   ? (float)CAMERA_MOVE_MS
                                          : effect == FOLD_PLANES ? 460.f
                                                                  : 420.f));
     float entry = remain * remain * remain;
-    float scale = 1.f - entry * (effect == CAMERA_PUSH   ? .24f
+    float scale = 1.f - entry * (effect == CAMERA_PUSH   ? .10f
                                  : effect == FOLD_PLANES ? .12f
                                                          : .065f);
-    float turn = effect == CAMERA_PUSH   ? (variant % 2 ? 15.f : -9.f)
+    float turn = effect == CAMERA_PUSH   ? (variant % 2 ? 7.f : -5.f)
                  : effect == FOLD_PLANES ? (variant % 2 ? 11.f : -10.f)
                                          : (variant % 2 ? 3.f : -3.f);
     float shift = radians(turn * entry);
@@ -577,7 +610,7 @@ static void typeset(const canvas_t *canvas, unsigned style, uint32_t elapsed,
         if (effect == CUT_PAPER)
             kick = (1.f - t) * (1.f - t) * (t < .2f ? 9.f : t < .4f ? -6.f : 3.f);
         if (effect == CAMERA_PUSH)
-            scale *= 1.f + .27f * (1.f - smooth(t));
+            scale *= 1.f + .10f * (1.f - smooth(t));
     }
     float c = cosine(shift), s = sine(shift);
     float ratio = (float)canvas->extent / DESIGN;
@@ -748,7 +781,7 @@ int paper_draw(aster_ge_t *gfx, int left, int top, int extent, unsigned style, u
     uint16_t *pixels = buf.ptr;
     canvas_t canvas = {pixels + top * stride + left, extent, stride, 0, 0, extent, extent};
     bool switching = transition.leaving || transition.age_ms < LYRIC_ENTER_MS;
-    unsigned settle_ms = style / LYRIC_VARIANTS == CAMERA_PUSH   ? 600
+    unsigned settle_ms = style / LYRIC_VARIANTS == CAMERA_PUSH   ? CAMERA_MOVE_MS
                          : style / LYRIC_VARIANTS == FOLD_PLANES ? 460
                                                                  : PAPER_TURN_MS;
     bool settled = glyph_count && lyrics && *lyrics && elapsed >= settle_ms && !switching;

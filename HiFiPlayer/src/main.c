@@ -2,6 +2,7 @@
 #include <aster_imports.h>
 #include <aster_gfx_engine.h>
 #include "cover.h"
+#include "flac_lyrics.h"
 #include "lrc.h"
 #include "paper.h"
 #include "shake.h"
@@ -78,6 +79,11 @@ static unsigned char lyric_bytes[LRC_FILE_LIMIT];
 static unsigned char gbk_table[LRC_GBK_BYTES];
 static bool gbk_ready;
 static size_t lyric_size;
+static enum { SIDECAR, FLAC_SCAN, FLAC_TAG, FLAC_TEXT } lyric_source;
+static flac_lyrics_t flac_scan;
+static lyric_span_t lyric_value, plain_candidate;
+static bool plain_lyrics;
+static unsigned plain_cue, plain_byte;
 static char lyric_track[256];
 static bool lyric_error;
 static int lyric_line = -1;
@@ -86,6 +92,12 @@ static bool lyric_animating;
 static int paper_line = -1;
 static unsigned paper_previous, paper_style;
 static uint32_t paper_began;
+/* The rasterizer presents synchronously. Predict when the cut will be seen
+ * from the measured cost of preparing and submitting previous camera frames. */
+enum { CAMERA_MAX_LEAD_MS = 100 };
+static uint32_t player_sample_at, camera_cut_ms = 80, camera_draw_ms;
+static uint32_t camera_prepare_ms;
+static bool camera_new_frame;
 static unsigned live_scene, rendered_live_scene;
 static enum page motion_origin = PLAYBACK;
 static enum lyric_effect motion_effect = LYRIC_EFFECT_COUNT;
@@ -368,6 +380,25 @@ static void lyrics_close(void)
     lyric_file = 0;
 }
 
+static void open_embedded_lyrics(void)
+{
+    if (strcmp(format(lyric_track), "FLAC"))
+        return;
+    aster_stat_t stat = {.size = sizeof(stat), .version = 1};
+    size_t n = strlen(lyric_track);
+    if (aster_fs_stat(lyric_track, n, &stat, sizeof(stat)) < 0 ||
+        aster_fs_open(lyric_track, n, ASTER_FS_O_RDONLY, &lyric_file) < 0) {
+        lyric_error = true;
+        return;
+    }
+    if (!flac_lyrics_begin(&flac_scan, lyric_file,
+                           stat.filesize > INT32_MAX ? INT32_MAX : (uint32_t)stat.filesize)) {
+        lyrics_close();
+        return;
+    }
+    lyric_source = FLAC_SCAN;
+}
+
 static void lyrics_track(const char *path)
 {
     if (!strcmp(path, lyric_track))
@@ -377,6 +408,10 @@ static void lyrics_track(const char *path)
     lrc_parse(&lyrics, NULL, 0, NULL);
     lyrics.text[0] = 0;
     lyric_size = 0;
+    lyric_source = SIDECAR;
+    plain_candidate = (lyric_span_t){0};
+    plain_lyrics = false;
+    plain_cue = plain_byte = 0;
     lyric_error = false;
     lyric_line = -1;
     paper_line = -1;
@@ -394,6 +429,7 @@ static void lyrics_track(const char *path)
     if (r < 0) {
         lyric_file = 0;
         lyric_error = r != ASTER_ENOENT;
+        open_embedded_lyrics();
     }
 }
 
@@ -421,30 +457,71 @@ static void lyrics_read(void)
 {
     if (!lyric_file)
         return;
-    size_t remaining = sizeof(lyric_bytes) - lyric_size;
+    if (lyric_source == FLAC_SCAN) {
+        enum flac_result found = flac_lyrics_next(&flac_scan, &lyric_value);
+        if (found == FLAC_MORE)
+            return;
+        if (found == FLAC_FOUND) {
+            lyric_source = FLAC_TAG;
+        } else if (plain_candidate.length) {
+            lyric_source = FLAC_TEXT;
+            lyric_value = plain_candidate;
+        } else {
+            lyric_error |= found == FLAC_INVALID;
+            lyrics_close();
+            dirty = true;
+            return;
+        }
+        lyric_size = 0;
+        if (aster_fs_seek(lyric_file, lyric_value.offset, ASTER_FS_SEEK_SET) < 0) {
+            lyric_error = dirty = true;
+            lyrics_close();
+            return;
+        }
+    }
+    bool embedded = lyric_source != SIDECAR;
+    size_t remaining = (embedded ? lyric_value.length : sizeof(lyric_bytes)) - lyric_size;
     unsigned char extra;
-    int n = remaining ? aster_fs_read(lyric_file, lyric_bytes + lyric_size,
-                                      remaining < 4096 ? remaining : 4096)
-                      : aster_fs_read(lyric_file, &extra, 1);
+    int n = 0;
+    if (remaining)
+        n = aster_fs_read(lyric_file, lyric_bytes + lyric_size, remaining < 4096 ? remaining : 4096);
+    else if (!embedded)
+        n = aster_fs_read(lyric_file, &extra, 1);
     if (n > 0 && remaining) {
         lyric_size += n;
         return;
     }
-    lyrics_close();
-    lyric_error = n != 0;
+    lyric_error = n != 0 || (embedded && remaining);
     if (!lyric_error) {
         enum lrc_encoding encoding = lrc_detect(lyric_bytes, lyric_size);
-        lyric_error = encoding == LRC_GBK && !load_gbk();
-        if (!lyric_error) {
+        if (lyric_source == FLAC_TEXT) {
+            lrc_parse_plain_utf8(&lyrics, lyric_bytes, lyric_size);
+            plain_lyrics = lyrics.count != 0;
+        } else if (embedded && encoding != LRC_UTF8) {
+            lyric_error = true;
+        } else if (encoding == LRC_GBK && !load_gbk()) {
+            lyric_error = true;
+        } else {
             lrc_parse(&lyrics, lyric_bytes, lyric_size, gbk_table);
-            const char *name = encoding == LRC_GBK    ? "GBK"
-                               : encoding == LRC_UTF8 ? "UTF-8"
-                                                      : "UTF-16";
-            aster_printf("HiFi LRC parsed: %u cues (%s)", lyrics.count, name);
-            if (numeric_title(lyrics.title))
-                aster_printf("HiFi ignored numeric LRC title: %s", lyrics.title);
+            if (!lyrics.count && lyric_source == FLAC_TAG && !plain_candidate.length) {
+                lrc_parse_plain_utf8(&lyrics, lyric_bytes, lyric_size);
+                if (lyrics.count)
+                    plain_candidate = lyric_value;
+                lrc_parse(&lyrics, NULL, 0, NULL);
+            }
         }
     }
+    if (!lyrics.count && lyric_source == FLAC_TAG) {
+        lyric_source = FLAC_SCAN;
+        return;
+    }
+    lyrics_close();
+    if (!lyrics.count && !embedded)
+        open_embedded_lyrics();
+    if (lyrics.count)
+        aster_printf("HiFi lyrics: %s %s lines=%u bytes=%u\n",
+                     embedded ? "FLAC" : "sidecar", plain_lyrics ? "plain" : "timed",
+                     lyrics.count, (unsigned)lyric_size);
     dirty = true;
 }
 
@@ -490,10 +567,47 @@ static bool can_seek(void)
     return player.mode == ASTER_PLAYER_LOCAL && player.duration_ms != 0;
 }
 
+static bool camera_running(void)
+{
+    return player.mode == ASTER_PLAYER_LOCAL && player.state == ASTER_PLAYER_PLAYING &&
+           seeking == SEEK_IDLE;
+}
+
+static uint32_t camera_position(uint32_t now, uint32_t rendering_ms)
+{
+    uint32_t at = position();
+    if (camera_running() && at < player.duration_ms) {
+        uint32_t elapsed = now - player_sample_at;
+        uint32_t advance = (elapsed < 200 ? elapsed : 200) + rendering_ms;
+        uint32_t left_ms = player.duration_ms - at;
+        at += advance < left_ms ? advance : left_ms;
+    }
+    return at;
+}
+
+static int camera_cue(uint32_t now)
+{
+    uint32_t at = camera_position(now, camera_cut_ms);
+    int next = lrc_active(&lyrics, at);
+    /* A cheaper cut can reduce the estimate while the first frame is already
+     * visible. Keep that cue until the playhead catches up, except on seeks. */
+    if (camera_running() && next < lyric_line && lyric_line >= 0 &&
+        (int64_t)camera_position(now, CAMERA_MAX_LEAD_MS) + lyrics.offset_ms >=
+            lyrics.cue[lyric_line].time_ms)
+        return lyric_line;
+    return next;
+}
+
 static void lyrics_tick(uint32_t now)
 {
     lyrics_read();
-    int next = lrc_active(&lyrics, position());
+    int next;
+    if (plain_lyrics)
+        next = (int)plain_cue;
+    else if (page == PAPER && motion_effect == CAMERA_PUSH)
+        next = camera_cue(now);
+    else
+        next = lrc_active(&lyrics, position());
     if (lyric_line != next) {
         lyric_animating = page == LYRICS && seeking == SEEK_IDLE && lyric_line >= 0 &&
                           next > lyric_line &&
@@ -749,6 +863,8 @@ static void playback(void)
 static int next_lyric_group(int first)
 {
     int next = first + 1;
+    if (plain_lyrics)
+        return next;
     while (next < (int)lyrics.count && lyrics.cue[next].time_ms == lyrics.cue[first].time_ms)
         next++;
     return next;
@@ -897,6 +1013,67 @@ static void lyric_scroll_view(int top_y, uint32_t now)
         draw_context_lyric(after[i], y, size, i < 2 ? muted : RGB(116, 124, 135));
 }
 
+static unsigned plain_row(unsigned cue, unsigned offset, uint32_t *shown)
+{
+    const char *body = lyrics.text + lyrics.cue[cue].text_offset + offset;
+    return aster_text_line(font(24), body, strlen(body), sx(400), shown);
+}
+
+static void scroll_plain(int steps)
+{
+    int direction = steps > 0 ? 1 : -1;
+    for (; steps; steps -= direction) {
+        const char *body = lyrics.text + lyrics.cue[plain_cue].text_offset;
+        uint32_t shown;
+        if (direction > 0) {
+            unsigned n = plain_row(plain_cue, plain_byte, &shown);
+            if (n && body[plain_byte + n])
+                plain_byte += n;
+            else if (plain_cue + 1 < lyrics.count) {
+                plain_cue++;
+                plain_byte = 0;
+            } else
+                return;
+        } else {
+            unsigned limit = plain_byte;
+            if (!limit) {
+                if (!plain_cue)
+                    return;
+                plain_cue--;
+                limit = strlen(lyrics.text + lyrics.cue[plain_cue].text_offset);
+            }
+            plain_byte = 0;
+            unsigned n;
+            while ((n = plain_row(plain_cue, plain_byte, &shown)) && n < limit - plain_byte)
+                plain_byte += n;
+        }
+    }
+}
+
+static void plain_view(int y)
+{
+    text(30, y, 400, 16, muted, "内嵌歌词 · 上下滑动翻阅", LEFT);
+    unsigned cue = plain_cue, offset = plain_byte;
+    int size = font(24), step = aster_text_line_h(size) + sy(8);
+    for (int py = sy(y + 30); cue < lyrics.count && py + step <= sy(LYRIC_PROGRESS - 24);
+         py += step) {
+        const char *body = lyrics.text + lyrics.cue[cue].text_offset + offset;
+        uint32_t shown;
+        unsigned n = plain_row(cue, offset, &shown);
+        if (!n)
+            break;
+        char row[768];
+        memcpy(row, body, shown);
+        row[shown] = 0;
+        text_run(30, py, 400, size, ink, row, LEFT);
+        offset += n;
+        if (!body[n]) {
+            cue++;
+            offset = 0;
+        }
+    }
+}
+
 static void lyric_page(uint32_t now)
 {
     char name[256];
@@ -911,6 +1088,8 @@ static void lyric_page(uint32_t now)
         text(30, 207, 400, 24, ink, heading, LEFT);
         if (!bluetooth_input() && !lyric_file)
             text(30, 249, 400, 20, muted, "将同名 LRC 放在歌曲旁边", LEFT);
+    } else if (plain_lyrics) {
+        plain_view(*by ? 84 : 65);
     } else {
         lyric_scroll_view(*by ? 84 : 65, now);
     }
@@ -969,23 +1148,45 @@ static void paper_tick(uint32_t now)
         if (paper_line < 0)
             paper_previous = paper_style;
         paper_prepare(&lyrics, next, player.duration_ms, paper_style);
+        if (motion_effect == CAMERA_PUSH) {
+            camera_new_frame = next >= 0;
+            camera_prepare_ms = aster_time_now_ms() - now;
+        }
         paper_began = now;
         paper_line = next;
         dirty = true;
     }
     uint32_t position_ms = position();
-    if (player.state == ASTER_PLAYER_PLAYING && seeking == SEEK_IDLE) {
+    if (motion_effect == CAMERA_PUSH) {
+        position_ms = camera_position(aster_time_now_ms(), camera_draw_ms);
+    } else if (player.state == ASTER_PLAYER_PLAYING && seeking == SEEK_IDLE) {
         uint32_t since_poll = now - last_poll;
         if (since_poll <= 50)
             position_ms += since_poll;
     }
-    if (paper_highlight(&lyrics, next, bluetooth_input() ? UINT32_MAX : position_ms) ||
+    if (paper_highlight(&lyrics, next, bluetooth_input() || plain_lyrics ? UINT32_MAX : position_ms) ||
         now - paper_began <= 650)
         dirty = true;
 }
 
+static uint32_t camera_age(uint32_t now)
+{
+    if (player.mode != ASTER_PLAYER_LOCAL || plain_lyrics || paper_line < 0)
+        return now - paper_began;
+    /* A late frame or a seek should show the camera where the lyric already
+     * is in the song, including the file's own LRC offset. */
+    int64_t age = (int64_t)camera_position(now, camera_draw_ms) + lyrics.offset_ms -
+                  lyrics.cue[paper_line].time_ms;
+    return age <= 0 ? 0 : age >= CAMERA_MOVE_MS ? CAMERA_MOVE_MS : (uint32_t)age;
+}
+
 static int draw_paper(uint32_t now)
 {
+    uint32_t age = now - paper_began;
+    if (motion_effect == CAMERA_PUSH) {
+        now = aster_time_now_ms();
+        age = camera_age(now);
+    }
     const char *body = paper_line < 0 ? NULL : lyrics.text + lyrics.cue[paper_line].text_offset;
     const char *status = lyrics.count        ? NULL
                          : bluetooth_input() ? "等待手机发送歌词"
@@ -994,8 +1195,22 @@ static int draw_paper(uint32_t now)
                                              : "暂无同步歌词";
     lyric_transition_t transition = {motion_transition ? now - motion_began : UINT32_MAX,
                                      motion_leaving};
-    return paper_draw(&gfx, left, top, content_w, paper_style, paper_previous, now - paper_began,
-                      body, status, transition);
+    int result = paper_draw(&gfx, left, top, content_w, paper_style, paper_previous, age, body,
+                            status, transition);
+    if (motion_effect == CAMERA_PUSH && result >= 0 && body && *body) {
+        uint32_t cost = aster_time_now_ms() - now;
+        if (camera_new_frame) {
+            uint32_t cut = cost + camera_prepare_ms;
+            if (cut > CAMERA_MAX_LEAD_MS)
+                cut = CAMERA_MAX_LEAD_MS;
+            camera_cut_ms = (3 * camera_cut_ms + cut) / 4;
+            camera_new_frame = false;
+        }
+        if (cost > CAMERA_MAX_LEAD_MS)
+            cost = CAMERA_MAX_LEAD_MS;
+        camera_draw_ms = (camera_draw_ms + cost) / 2;
+    }
+    return result;
 }
 
 static int current_index(void)
@@ -1308,6 +1523,14 @@ static void touch(const aster_event_t *event)
             set_page((enum page)clamp((int)page + (dx < 0 ? 1 : -1), LYRICS, LIBRARY));
     } else if (page == LIBRARY && ay >= 42 && ay * 2 > ax * 3 && finger.y >= 110) {
         change_library_page(dy < 0 ? 1 : -1);
+    } else if (plain_lyrics && (page == LYRICS || page == PAPER) && !is_slider &&
+               ay >= 28 && ay * 2 > ax * 3) {
+        if (page == PAPER) {
+            plain_cue = clamp((int)plain_cue + (dy < 0 ? 1 : -1), 0, (int)lyrics.count - 1);
+            plain_byte = 0;
+        } else {
+            scroll_plain((dy < 0 ? 1 : -1) * clamp((ay + 18) / 36, 1, 12));
+        }
     } else if (!finger.moved && id != NONE && hit(x, y) == id)
         activate(id);
     dirty = true;
@@ -1320,6 +1543,7 @@ static void poll(uint32_t now)
     last_poll = now;
     aster_player_info_t next = {.size = sizeof(next), .version = 1};
     if (!aster_player_get_info(&next, sizeof(next))) {
+        player_sample_at = now;
         player.position_ms = next.position_ms;
         memcpy(player.reserved, next.reserved, sizeof(player.reserved));
         if (memcmp(&next, &player, sizeof(next)))
@@ -1371,6 +1595,7 @@ ASTER_APP_EXPORT int aster_app_init(void)
     result = aster_player_get_info(&player, sizeof(player));
     if (result < 0)
         return result;
+    player_sample_at = aster_time_now_ms();
     int initial_volume = aster_audio_get_volume();
     volume = initial_volume < 0 ? 40 : clamp(initial_volume, 0, 100);
     aster_surface_desc_t desc = {.size = sizeof(desc),

@@ -1,20 +1,24 @@
 /* SPDX-License-Identifier: MIT */
 #include "cover.h"
+#include "cover_jpeg.h"
 
-enum { COVER_EDGE = 208, COPY_CHUNK = 16384, MAX_EMBEDDED = 4 * 1024 * 1024 };
+enum { MAX_EMBEDDED = 4 * 1024 * 1024 };
 
 static const char scratch[] = "/cache/hifi-cover.img";
 static uint16_t pixels[COVER_EDGE * COVER_EDGE];
-static uint8_t chunk[COPY_CHUNK];
+static _Alignas(8) uint8_t chunk[COVER_WORK_BYTES];
 static uint32_t image_w, image_h, remaining;
 static uint16_t tint;
 static aster_handle_t input, output;
 static char track_path[256];
-static bool pending;
+enum cover_phase { IDLE, SIDECAR, EXTERNAL, EMBEDDED, COPY, DECODE_COPY, JPEG };
+static enum cover_phase phase, jpeg_fallback;
+static unsigned extension_index;
 static uint32_t remote_revision;
 
 struct picture {
     uint32_t offset, length;
+    bool jpeg;
 };
 
 static uint32_t be32(const uint8_t *p)
@@ -51,7 +55,7 @@ static bool picture_at(uint32_t at, uint32_t length, bool front, struct picture 
         memcmp(magic, "BM", 2))
         return false;
     if (!out->length || front)
-        *out = (struct picture){at, length};
+        *out = (struct picture){at, length, magic[0] == 255 && magic[1] == 216};
     return front;
 }
 
@@ -199,24 +203,36 @@ static void wave(uint32_t end, struct picture *out)
     }
 }
 
-static void close_copy(void)
+static void close_files(void)
 {
     if (input)
         aster_fs_close(input);
-    if (output) {
+    if (output)
         aster_fs_close(output);
+    if (output || phase == DECODE_COPY)
         aster_fs_unlink(scratch, sizeof(scratch) - 1);
-    }
     input = output = remaining = 0;
 }
 
-static bool begin_copy(void)
+static void begin_jpeg(uint32_t offset, uint32_t length, unsigned cap, enum cover_phase fallback)
 {
+    if (cover_jpeg_begin(input, offset, length, cap, pixels, chunk)) {
+        jpeg_fallback = fallback;
+        phase = JPEG;
+    } else {
+        close_files();
+        phase = fallback;
+    }
+}
+
+static void begin_embedded(unsigned cap)
+{
+    phase = IDLE;
     aster_stat_t st = {.size = sizeof(st), .version = 1};
     uint32_t n = strlen(track_path);
     if (aster_fs_stat(track_path, n, &st, sizeof(st)) < 0 || st.filesize < 12 ||
         aster_fs_open(track_path, n, ASTER_FS_O_RDONLY, &input) < 0)
-        return false;
+        return;
     uint32_t size = st.filesize > INT32_MAX ? INT32_MAX : (uint32_t)st.filesize;
     uint8_t head[12];
     struct picture picture = {0};
@@ -228,35 +244,27 @@ static bool begin_copy(void)
         else if (!memcmp(head, "RIFF", 4) && !memcmp(head + 8, "WAVE", 4))
             wave(size, &picture);
     }
+    if (picture.jpeg) {
+        begin_jpeg(picture.offset, picture.length, cap, IDLE);
+        return;
+    }
     if (picture.length && aster_fs_seek(input, picture.offset, ASTER_FS_SEEK_SET) >= 0) {
         aster_fs_mkdir("/cache", 6);
         if (aster_fs_open(scratch, sizeof(scratch) - 1,
                           ASTER_FS_O_WRONLY | ASTER_FS_O_CREAT | ASTER_FS_O_TRUNC, &output) >= 0) {
             remaining = picture.length;
-            return true;
+            phase = COPY;
+            return;
         }
     }
-    close_copy();
-    return false;
+    close_files();
 }
 
-static bool decode(const char *path, unsigned cap)
+static bool finish_image(uint32_t w, uint32_t h)
 {
-    if (cap > COVER_EDGE)
-        cap = COVER_EDGE;
-    if (!cap)
-        return false;
-    aster_img_render_args_t args = {.size = sizeof(args),
-                                    .version = 1,
-                                    .dst_off = (uint32_t)(uintptr_t)pixels,
-                                    .dst_span = sizeof(pixels),
-                                    .cap_w = cap,
-                                    .cap_h = cap};
-    if (aster_img_render(path, strlen(path), &args, sizeof(args)) < 0 || !args.out_w ||
-        !args.out_h || args.out_w > cap || args.out_h > cap)
-        return false;
-    image_w = args.out_w;
-    image_h = args.out_h;
+    image_w = w;
+    image_h = h;
+    phase = IDLE;
     unsigned r = 0, g = 0, b = 0, count = 0;
     for (unsigned y = 0; y < image_h; y += 4) {
         for (unsigned x = 0; x < image_w; x += 4) {
@@ -268,8 +276,41 @@ static bool decode(const char *path, unsigned cap)
         }
     }
     tint = (r / count) << 11 | (g / count) << 5 | b / count;
-    aster_printf("HiFi cover %ux%u", image_w, image_h);
+    aster_printf("HiFi cover %ux%u\n", image_w, image_h);
     return true;
+}
+
+static bool decode_native(const char *path, unsigned cap)
+{
+    aster_img_render_args_t args = {.size = sizeof(args),
+                                    .version = 1,
+                                    .dst_off = (uint32_t)(uintptr_t)pixels,
+                                    .dst_span = sizeof(pixels),
+                                    .cap_w = cap,
+                                    .cap_h = cap};
+    if (aster_img_render(path, strlen(path), &args, sizeof(args)) < 0 || !args.out_w ||
+        !args.out_h || args.out_w > cap || args.out_h > cap)
+        return false;
+    return finish_image(args.out_w, args.out_h);
+}
+
+static bool open_image(const char *path, unsigned cap, enum cover_phase fallback)
+{
+    phase = fallback;
+    unsigned n = strlen(path);
+    if (aster_fs_open(path, n, ASTER_FS_O_RDONLY, &input) < 0)
+        return false;
+    uint8_t magic[2];
+    if (read_at(0, magic, sizeof(magic)) && magic[0] == 255 && magic[1] == 216) {
+        aster_stat_t st = {.size = sizeof(st), .version = 1};
+        if (aster_fs_stat(path, n, &st, sizeof(st)) == 0 && st.filesize <= INT32_MAX)
+            begin_jpeg(0, (uint32_t)st.filesize, cap, fallback);
+        else
+            close_files();
+        return false;
+    }
+    close_files();
+    return decode_native(path, cap);
 }
 
 static bool sidecar(unsigned cap)
@@ -279,19 +320,20 @@ static bool sidecar(unsigned cap)
     for (const char *p = track_path; *p; p++)
         if (*p == '.')
             ext = p;
-    if (!ext)
+    if (!ext || extension_index >= sizeof(extensions) / sizeof(extensions[0])) {
+        phase = EMBEDDED;
         return false;
+    }
     size_t prefix = ext - track_path;
     char path[256];
-    if (prefix + 6 > sizeof(path))
+    if (prefix + 6 > sizeof(path)) {
+        phase = EMBEDDED;
         return false;
-    memcpy(path, track_path, prefix);
-    for (unsigned i = 0; i < sizeof(extensions) / sizeof(extensions[0]); i++) {
-        memcpy(path + prefix, extensions[i], strlen(extensions[i]) + 1);
-        if (decode(path, cap))
-            return true;
     }
-    return false;
+    memcpy(path, track_path, prefix);
+    const char *extension = extensions[extension_index++];
+    memcpy(path + prefix, extension, strlen(extension) + 1);
+    return open_image(path, cap, SIDECAR);
 }
 
 void cover_select(const char *track)
@@ -299,10 +341,11 @@ void cover_select(const char *track)
     if (!remote_revision && !strcmp(track, track_path))
         return;
     remote_revision = 0;
-    close_copy();
+    close_files();
     aster_snprintf(track_path, sizeof(track_path), "%s", track);
     image_w = image_h = 0;
-    pending = *track != 0;
+    extension_index = 0;
+    phase = !*track ? IDLE : !strcmp(track, "/assets/audio/demo.flac") ? EXTERNAL : SIDECAR;
 }
 
 void cover_select_remote(const char *path, uint32_t revision)
@@ -313,31 +356,49 @@ void cover_select_remote(const char *path, uint32_t revision)
     }
     if (remote_revision == revision && !strcmp(path, track_path))
         return;
-    close_copy();
+    close_files();
     aster_snprintf(track_path, sizeof(track_path), "%s", path);
     remote_revision = revision;
     image_w = image_h = 0;
-    pending = true;
+    phase = EXTERNAL;
 }
 
 bool cover_tick(unsigned cap)
 {
-    if (pending) {
-        pending = false;
-        if (remote_revision)
-            return decode(track_path, cap);
-        if (!strcmp(track_path, "/assets/audio/demo.flac"))
-            return decode("/assets/art/moonlight.bmp", cap);
-        if (sidecar(cap))
-            return true;
-        begin_copy();
+    if (cap > COVER_EDGE)
+        cap = COVER_EDGE;
+    if (!cap || phase == IDLE)
+        return false;
+    if (phase == SIDECAR)
+        return sidecar(cap);
+    if (phase == EXTERNAL)
+        return open_image(remote_revision ? track_path : "/assets/art/moonlight.bmp", cap, IDLE);
+    if (phase == EMBEDDED) {
+        begin_embedded(cap);
+        return false;
     }
-    if (!remaining)
+    if (phase == JPEG) {
+        uint32_t w, h;
+        int result = cover_jpeg_step(&w, &h);
+        if (!result)
+            return false;
+        close_files();
+        phase = jpeg_fallback;
+        return result > 0 && finish_image(w, h);
+    }
+    if (phase == DECODE_COPY) {
+        phase = IDLE;
+        bool ok = decode_native(scratch, cap);
+        aster_fs_unlink(scratch, sizeof(scratch) - 1);
+        return ok;
+    }
+    if (phase != COPY)
         return false;
     uint32_t n = remaining < sizeof(chunk) ? remaining : sizeof(chunk);
     if (aster_fs_read(input, chunk, n) != (int32_t)n ||
         aster_fs_write(output, chunk, n) != (int32_t)n) {
-        close_copy();
+        close_files();
+        phase = IDLE;
         return false;
     }
     remaining -= n;
@@ -347,14 +408,14 @@ bool cover_tick(unsigned cap)
     output = 0;
     aster_fs_close(input);
     input = 0;
-    bool ok = decode(scratch, cap);
-    aster_fs_unlink(scratch, sizeof(scratch) - 1);
-    return ok;
+    phase = DECODE_COPY;
+    return false;
 }
 
 void cover_close(void)
 {
-    close_copy();
+    close_files();
+    phase = IDLE;
 }
 
 bool cover_ready(void)

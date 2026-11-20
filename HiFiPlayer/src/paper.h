@@ -8,6 +8,7 @@
 #define PAPER_TURN_MS 450u
 enum lyric_effect { CUT_PAPER, FOLD_PLANES, CAMERA_PUSH, LYRIC_EFFECT_COUNT };
 enum { LYRIC_VARIANTS = 6, LYRIC_ENTER_MS = 570, LYRIC_EXIT_MS = 320 };
+enum { CAMERA_MOVE_MS = 240 };
 
 typedef struct {
     uint32_t age_ms;

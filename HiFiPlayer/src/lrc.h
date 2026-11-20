@@ -32,6 +32,7 @@ typedef struct {
 
 enum lrc_encoding lrc_detect(const unsigned char *bytes, size_t size);
 void lrc_parse(lrc_t *out, const unsigned char *bytes, size_t size, const unsigned char *gbk);
+void lrc_parse_plain_utf8(lrc_t *out, const unsigned char *bytes, size_t size);
 int lrc_active(const lrc_t *lyrics, uint32_t position_ms);
 unsigned lrc_sung_bytes(const lrc_t *lyrics, unsigned cue, uint32_t position_ms);
 

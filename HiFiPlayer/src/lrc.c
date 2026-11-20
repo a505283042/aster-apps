@@ -284,6 +284,47 @@ void lrc_parse(lrc_t *out, const unsigned char *bytes, size_t size, const unsign
     }
 }
 
+/* Vorbis comments contain UTF-8. Preserve paragraph order when a tag has
+ * no timestamps. Split unusually long paragraphs at UTF-8 boundaries so
+ * the same lines can also be shown by the full-screen lyric renderer. */
+void lrc_parse_plain_utf8(lrc_t *out, const unsigned char *bytes, size_t size)
+{
+    out->count = out->used = out->words_used = 0;
+    out->title[0] = out->artist[0] = 0;
+    out->offset_ms = 0;
+    size_t at = size >= 3 && !memcmp(bytes, "\xef\xbb\xbf", 3) ? 3 : 0;
+    while (at < size && out->count < LRC_CUE_LIMIT) {
+        while (at < size && bytes[at] <= ' ')
+            at++;
+        size_t start = at, space = start;
+        while (at < size && bytes[at] && bytes[at] != '\n' && bytes[at] != '\r' &&
+               at - start < 760) {
+            if (bytes[at] == ' ')
+                space = at;
+            at++;
+        }
+        if (at - start == 760 && at < size) {
+            if (space > start)
+                at = space;
+            else
+                while (at > start && (bytes[at] & 0xc0) == 0x80)
+                    at--;
+        }
+        size_t end = at;
+        while (end > start && bytes[end - 1] <= ' ')
+            end--;
+        size_t n = end - start;
+        if (!n)
+            continue;
+        if (n + 1 > sizeof(out->text) - out->used)
+            break;
+        out->cue[out->count++] = (lrc_cue_t){.text_offset = out->used};
+        memcpy(out->text + out->used, bytes + start, n);
+        out->text[out->used + n] = 0;
+        out->used += n + 1;
+    }
+}
+
 int lrc_active(const lrc_t *lyrics, uint32_t position_ms)
 {
     int64_t clock = (int64_t)position_ms + lyrics->offset_ms;
