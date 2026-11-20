@@ -11,6 +11,7 @@ static uint16_t tint;
 static aster_handle_t input, output;
 static char track_path[256];
 static bool pending;
+static uint32_t remote_revision;
 
 struct picture {
     uint32_t offset, length;
@@ -295,18 +296,36 @@ static bool sidecar(unsigned cap)
 
 void cover_select(const char *track)
 {
-    if (!strcmp(track, track_path))
+    if (!remote_revision && !strcmp(track, track_path))
         return;
+    remote_revision = 0;
     close_copy();
     aster_snprintf(track_path, sizeof(track_path), "%s", track);
     image_w = image_h = 0;
     pending = *track != 0;
 }
 
+void cover_select_remote(const char *path, uint32_t revision)
+{
+    if (!revision || !*path) {
+        cover_select("");
+        return;
+    }
+    if (remote_revision == revision && !strcmp(path, track_path))
+        return;
+    close_copy();
+    aster_snprintf(track_path, sizeof(track_path), "%s", path);
+    remote_revision = revision;
+    image_w = image_h = 0;
+    pending = true;
+}
+
 bool cover_tick(unsigned cap)
 {
     if (pending) {
         pending = false;
+        if (remote_revision)
+            return decode(track_path, cap);
         if (!strcmp(track_path, "/assets/audio/demo.flac"))
             return decode("/assets/art/moonlight.bmp", cap);
         if (sidecar(cap))

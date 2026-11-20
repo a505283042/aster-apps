@@ -6,6 +6,7 @@
 #include <aster_imports.h>
 
 void cover_select(const char *track);
+void cover_select_remote(const char *path, uint32_t revision);
 bool cover_tick(unsigned cap);
 void cover_close(void);
 bool cover_ready(void);

@@ -86,13 +86,14 @@ static bool lyric_animating;
 static int paper_line = -1;
 static unsigned paper_previous, paper_style;
 static uint32_t paper_began;
+static unsigned live_scene, rendered_live_scene;
 static enum page motion_origin = PLAYBACK;
 static enum lyric_effect motion_effect = LYRIC_EFFECT_COUNT;
 static uint32_t motion_began;
 static bool motion_leaving, motion_transition;
 static bool imu_available;
 static shake_t shake;
-static uint32_t shake_after, imu_sequence;
+static uint32_t shake_after, imu_sequence, imu_retry_at;
 
 static struct {
     bool down, moved, rejected, page_swipe;
@@ -374,6 +375,7 @@ static void lyrics_track(const char *path)
     lyrics_close();
     aster_snprintf(lyric_track, sizeof(lyric_track), "%s", path);
     lrc_parse(&lyrics, NULL, 0, NULL);
+    lyrics.text[0] = 0;
     lyric_size = 0;
     lyric_error = false;
     lyric_line = -1;
@@ -446,9 +448,46 @@ static void lyrics_read(void)
     dirty = true;
 }
 
+/* A car-lyrics player publishes one display line in AVRCP metadata. There is
+ * no time-coded transcript or word timing. Reuse the local line layouts. */
+static void sync_media(void)
+{
+    if (!bluetooth_input()) {
+        const char *path = sandbox_track(player.path);
+        lyrics_track(path);
+        cover_select(path);
+        live_scene = 0;
+        return;
+    }
+    lyrics_track("@bluetooth");
+    cover_select_remote(player.path, player.flags & ASTER_PLAYER_F_COVER ? player.reserved[2] : 0);
+    const char *line = player.flags & ASTER_PLAYER_F_REMOTE ? player.title : "";
+    if (!strcmp(line, lyrics.text))
+        return;
+    aster_snprintf(lyrics.text, sizeof(player.title), "%s", line);
+    lyrics.count = *line ? 1 : 0;
+    lyrics.cue[0] = (lrc_cue_t){0};
+    lyric_line = *line ? 0 : -1;
+    live_scene++;
+    dirty = true;
+}
+
 static uint32_t position(void)
 {
-    return seeking != SEEK_IDLE ? seek_position : player.position_ms;
+    if (seeking != SEEK_IDLE && !bluetooth_input())
+        return seek_position;
+    return player.position_ms;
+}
+
+static bool has_position(void)
+{
+    return bluetooth_input() ? (player.flags & ASTER_PLAYER_F_POSITION) != 0
+                             : player.duration_ms != 0;
+}
+
+static bool can_seek(void)
+{
+    return player.mode == ASTER_PLAYER_LOCAL && player.duration_ms != 0;
 }
 
 static void lyrics_tick(uint32_t now)
@@ -510,11 +549,22 @@ static enum lyric_effect pick_lyric_effect(uint32_t now, uint32_t sequence)
 
 static void shake_poll(uint32_t now)
 {
-    if (!imu_available || motion_leaving || finger.down)
+    if (motion_leaving || finger.down || (!imu_available && (int32_t)(now - imu_retry_at) < 0))
         return;
     aster_imu_sample_t sample = {.size = sizeof(sample), .version = 1};
-    if (aster_imu_read(&sample, sizeof(sample)) < 0 || !(sample.flags & ASTER_IMU_ACCEL_VALID) ||
-        sample.sequence == imu_sequence)
+    int result = aster_imu_read(&sample, sizeof(sample));
+    if (result < 0 || !(sample.flags & ASTER_IMU_ACCEL_VALID)) {
+        if (imu_available)
+            aster_printf("HiFi accelerometer unavailable (%d), retrying", result);
+        imu_available = false;
+        imu_retry_at = now + 1000;
+        return;
+    }
+    if (!imu_available) {
+        imu_available = true;
+        aster_printf("HiFi accelerometer ready seq=%u", sample.sequence);
+    }
+    if (sample.sequence == imu_sequence)
         return;
     imu_sequence = sample.sequence;
     if (!shake_update(&shake, sample.accel, now) || (int32_t)(now - shake_after) < 0)
@@ -591,23 +641,22 @@ static void progress(int y, bool compact)
     int time_y = y + (compact ? 24 : 16);
     int time_size = compact ? 16 : 18;
     box(PROGRESS_X, y, PROGRESS_W, bar_height, bar_height / 2, rail, false);
-    if (player.duration_ms) {
+    if (player.duration_ms && has_position()) {
         uint32_t now = position();
         if (now > player.duration_ms)
             now = player.duration_ms;
         int fill = (int)((uint64_t)now * PROGRESS_W / player.duration_ms);
         if (fill)
             box(PROGRESS_X, y, fill, bar_height, bar_height / 2, gold, false);
-        circle(PROGRESS_X + fill, y + bar_height / 2, compact ? 7 : 11, gold);
-        char time[24];
-        clock_text(time, now);
-        text(32, time_y, 145, time_size, seeking != SEEK_IDLE ? gold : ink, time, LEFT);
-        clock_text(time, player.duration_ms);
-        text(283, time_y, 145, time_size, muted, time, RIGHT);
-    } else {
-        text(32, time_y, 145, time_size, muted, "--:--", LEFT);
-        text(283, time_y, 145, time_size, muted, "--:--", RIGHT);
+        if (can_seek())
+            circle(PROGRESS_X + fill, y + bar_height / 2, compact ? 7 : 11, gold);
     }
+    char time[24];
+    clock_text(time, position());
+    text(32, time_y, 145, time_size, seeking != SEEK_IDLE ? gold : ink,
+         has_position() ? time : "--:--", LEFT);
+    clock_text(time, player.duration_ms);
+    text(283, time_y, 145, time_size, muted, player.duration_ms ? time : "--:--", RIGHT);
 }
 
 static void fallback_art(uint16_t base)
@@ -666,17 +715,17 @@ static void playback(void)
     playback_slider(VOLUME_X, VOLUME_Y, VOLUME_W, volume * VOLUME_W / 100, track, accent, true);
 
     char stamp[24];
-    uint32_t pos = position() < player.duration_ms ? position() : player.duration_ms;
-    if (player.duration_ms)
-        clock_text(stamp, pos);
+    uint32_t pos = position();
+    if (player.duration_ms && pos > player.duration_ms)
+        pos = player.duration_ms;
+    clock_text(stamp, pos);
     text(25, 348, 153, 48, seeking != SEEK_IDLE ? accent : ink,
-         player.duration_ms ? stamp : "--:--", LEFT);
+         has_position() ? stamp : "--:--", LEFT);
     if (player.duration_ms)
         clock_text(stamp, player.duration_ms);
     text(177, 376, 60, 14, subtitle, player.duration_ms ? stamp : "--:--", RIGHT);
     int fill = player.duration_ms ? (uint64_t)pos * PLAY_SEEK_W / player.duration_ms : 0;
-    playback_slider(PLAY_SEEK_X, PLAY_PROGRESS, PLAY_SEEK_W, fill, track, accent,
-                    player.duration_ms != 0);
+    playback_slider(PLAY_SEEK_X, PLAY_PROGRESS, PLAY_SEEK_W, fill, track, accent, can_seek());
 
     box(PANEL_X, PANEL_Y, PANEL_W, PANEL_H, 19, tray, false);
     box(STEP_X, STEP_UP, STEP_W, STEP_H, 12, finger.control == PREVIOUS ? track : key, false);
@@ -852,10 +901,10 @@ static void lyric_page(uint32_t now)
 {
     char name[256];
     const char *by = artist();
-    text(30, 18, 400, 24, ink, title(name), LEFT);
+    text(30, 18, 400, 24, ink, bluetooth_input() ? "蓝牙实时歌词" : title(name), LEFT);
     text(30, 49, 400, 16, muted, by, LEFT);
     if (!lyrics.count) {
-        const char *heading = bluetooth_input() ? "手机音频暂无本地歌词"
+        const char *heading = bluetooth_input() ? "等待手机发送歌词"
                               : lyric_file      ? "正在读取歌词"
                               : lyric_error     ? "无法读取歌词文件"
                                                 : "暂无同步歌词";
@@ -865,11 +914,16 @@ static void lyric_page(uint32_t now)
     } else {
         lyric_scroll_view(*by ? 84 : 65, now);
     }
-    progress(LYRIC_PROGRESS, true);
+    if (bluetooth_input() && !player.duration_ms && !has_position())
+        text(30, LYRIC_PROGRESS, 400, 16, muted, "手机音乐设置 · 外接设备蓝牙歌词", LEFT);
+    else
+        progress(LYRIC_PROGRESS, true);
 }
 
 static unsigned paper_layout(int cue)
 {
+    if (bluetooth_input())
+        return (unsigned)motion_effect * LYRIC_VARIANTS + live_scene % LYRIC_VARIANTS;
     unsigned scene = 0;
     for (int i = 0; i < cue;) {
         int end = next_lyric_group(i);
@@ -907,7 +961,8 @@ static void paper_tick(uint32_t now)
         }
         next = following;
     }
-    if (next != paper_line) {
+    if (next != paper_line || (bluetooth_input() && rendered_live_scene != live_scene)) {
+        rendered_live_scene = live_scene;
         paper_previous = paper_style;
         if (next >= 0)
             paper_style = paper_layout(lyric_line);
@@ -924,7 +979,8 @@ static void paper_tick(uint32_t now)
         if (since_poll <= 50)
             position_ms += since_poll;
     }
-    if (paper_highlight(&lyrics, next, position_ms) || now - paper_began <= 650)
+    if (paper_highlight(&lyrics, next, bluetooth_input() ? UINT32_MAX : position_ms) ||
+        now - paper_began <= 650)
         dirty = true;
 }
 
@@ -932,7 +988,7 @@ static int draw_paper(uint32_t now)
 {
     const char *body = paper_line < 0 ? NULL : lyrics.text + lyrics.cue[paper_line].text_offset;
     const char *status = lyrics.count        ? NULL
-                         : bluetooth_input() ? "手机音频暂无本地歌词"
+                         : bluetooth_input() ? "等待手机发送歌词"
                          : lyric_file        ? "正在读取歌词"
                          : lyric_error       ? "无法读取歌词文件"
                                              : "暂无同步歌词";
@@ -1050,13 +1106,13 @@ static int hit(int x, int y)
             return PAGE_NEXT;
         return NONE;
     }
-    if (page == LYRICS && y >= LYRIC_SEEK_TOP && y < CONTENT_END)
+    if (page == LYRICS && can_seek() && y >= LYRIC_SEEK_TOP && y < CONTENT_END)
         return SEEK;
     if (page == PLAYBACK) {
         if (x >= 19 && x < PANEL_X - 7) {
             if (y >= VOLUME_Y - 20 && y < VOLUME_Y + 20)
                 return VOLUME;
-            if (y >= PLAY_PROGRESS - 25 && y < PLAY_PROGRESS + 25)
+            if (can_seek() && y >= PLAY_PROGRESS - 25 && y < PLAY_PROGRESS + 25)
                 return SEEK;
         }
         if (x >= STEP_X && x < STEP_X + STEP_W) {
@@ -1182,7 +1238,7 @@ static void slider(int id, int x)
         int next = clamp((x - VOLUME_X) * 100 / VOLUME_W, 0, 100);
         if (volume != next && aster_audio_set_volume(next) >= 0)
             volume = next;
-    } else if (!bluetooth_input() && player.duration_ms) {
+    } else if (id == SEEK && can_seek()) {
         int start = page == PLAYBACK ? PLAY_SEEK_X : PROGRESS_X;
         int span = page == PLAYBACK ? PLAY_SEEK_W : PROGRESS_W;
         seek_position = (uint32_t)((uint64_t)player.duration_ms * clamp(x - start, 0, span) / span);
@@ -1286,8 +1342,7 @@ static void poll(uint32_t now)
             }
         }
     }
-    lyrics_track(bluetooth_input() ? "" : sandbox_track(player.path));
-    cover_select(bluetooth_input() ? "" : sandbox_track(player.path));
+    sync_media();
     int next_volume = aster_audio_get_volume();
     if (next_volume >= 0 && next_volume != volume) {
         volume = clamp(next_volume, 0, 100);
@@ -1328,14 +1383,11 @@ ASTER_APP_EXPORT int aster_app_init(void)
         return result;
     aster_ge_init(&gfx, surface, width, height, commands, 160, arena, sizeof(arena));
     scan_start();
-    lyrics_track(bluetooth_input() ? "" : sandbox_track(player.path));
-    cover_select(bluetooth_input() ? "" : sandbox_track(player.path));
-    aster_imu_info_t imu = {.size = sizeof(imu), .version = 1};
-    imu_available = !aster_imu_get_info(&imu, sizeof(imu)) && (imu.flags & ASTER_IMU_ACCEL_VALID);
+    sync_media();
+    imu_retry_at = aster_time_now_ms();
     aster_app_set_framerate(30);
     dirty = true;
-    aster_printf("HiFi init %ux%u caps=%u shake=%u", width, height, player.capabilities,
-                 imu_available ? 1u : 0u);
+    aster_printf("HiFi init %ux%u caps=%u", width, height, player.capabilities);
     return 0;
 }
 
