@@ -8,6 +8,19 @@ bool shake_update(shake_t *s, const float accel[3], uint32_t now)
     float magnitude = 0;
     for (unsigned i = 0; i < 3; i++) magnitude += accel[i] * accel[i];
     if (!(magnitude <= 70.f * 70.f)) return false;
+    if (s->wait_for_rest) {
+        uint32_t dt = now - s->last_sample;
+        s->last_sample = now;
+        if (dt > SAMPLE_GAP_MS || magnitude < 7.f * 7.f || magnitude > 12.f * 12.f) {
+            s->rest_ms = 0;
+            return false;
+        }
+        s->rest_ms += dt;
+        if (s->rest_ms < 170)
+            return false;
+        s->wait_for_rest = false;
+        s->primed = false;
+    }
     if (!s->primed || now - s->last_sample > SAMPLE_GAP_MS) {
         for (unsigned i = 0; i < 3; i++) s->gravity[i] = accel[i];
         s->primed = true;
@@ -34,6 +47,8 @@ bool shake_update(shake_t *s, const float accel[3], uint32_t now)
     if (s->peak_energy && since_peak >= REVERSAL_MIN_MS && dot < 0 &&
         dot * dot >= energy * s->peak_energy * .20f) {
         s->peak_energy = 0;
+        s->wait_for_rest = true;
+        s->rest_ms = 0;
         return true;
     }
     if (!s->peak_energy || (since_peak < REVERSAL_MIN_MS && dot > 0 && energy > s->peak_energy)) {

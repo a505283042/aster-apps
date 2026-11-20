@@ -84,8 +84,12 @@ static int lyric_line = -1;
 static uint32_t lyric_scroll;
 static bool lyric_animating;
 static int paper_line = -1;
-static unsigned paper_sung, paper_previous, paper_style;
+static unsigned paper_previous, paper_style;
 static uint32_t paper_began;
+static enum page motion_origin = PLAYBACK;
+static enum lyric_effect motion_effect = LYRIC_EFFECT_COUNT;
+static uint32_t motion_began;
+static bool motion_leaving, motion_transition;
 static bool imu_available;
 static shake_t shake;
 static uint32_t shake_after, imu_sequence;
@@ -374,7 +378,6 @@ static void lyrics_track(const char *path)
     lyric_error = false;
     lyric_line = -1;
     paper_line = -1;
-    paper_sung = 0;
     lyric_animating = false;
     dirty = true;
     if (!*format(path))
@@ -476,10 +479,14 @@ static void set_page(enum page target)
     if (page == PAPER || target == PAPER) {
         uint32_t now = aster_time_now_ms();
         memset(&shake, 0, sizeof(shake));
+        shake.wait_for_rest = true;
+        shake.last_sample = now;
         shake_after = now + 800;
         paper_line = -1;
-        paper_previous = paper_style = paper_sung = 0;
+        paper_previous = paper_style = 0;
         paper_began = now;
+        paper_invalidate();
+        motion_transition = motion_leaving = false;
     }
     page = target;
     lyric_animating = false;
@@ -488,19 +495,47 @@ static void set_page(enum page target)
     dirty = true;
 }
 
+static enum lyric_effect pick_lyric_effect(uint32_t now, uint32_t sequence)
+{
+    /* Mix the gesture timing and IMU sample counter before choosing a style. */
+    uint32_t draw = now + sequence * 0x9e3779b9u;
+    draw ^= draw >> 16;
+    draw *= 0x85ebca6bu;
+    draw ^= draw >> 13;
+    if (motion_effect == LYRIC_EFFECT_COUNT)
+        return (enum lyric_effect)(draw % LYRIC_EFFECT_COUNT);
+    unsigned step = 1u + draw % (LYRIC_EFFECT_COUNT - 1u);
+    return (enum lyric_effect)((motion_effect + step) % LYRIC_EFFECT_COUNT);
+}
+
 static void shake_poll(uint32_t now)
 {
-    if (!imu_available || page == PAPER || finger.down || (int32_t)(now - shake_after) < 0)
+    if (!imu_available || motion_leaving || finger.down)
         return;
     aster_imu_sample_t sample = {.size = sizeof(sample), .version = 1};
     if (aster_imu_read(&sample, sizeof(sample)) < 0 || !(sample.flags & ASTER_IMU_ACCEL_VALID) ||
         sample.sequence == imu_sequence)
         return;
     imu_sequence = sample.sequence;
-    if (shake_update(&shake, sample.accel, now)) {
-        aster_printf("HiFi paper lyrics: shake detected");
+    if (!shake_update(&shake, sample.accel, now) || (int32_t)(now - shake_after) < 0)
+        return;
+    if (page != PAPER) {
+        motion_origin = page;
+        motion_effect = pick_lyric_effect(now, sample.sequence);
         set_page(PAPER);
+        paper_line = -2; /* Prepare the opening frame even during a lyric gap. */
+        paper_style = paper_previous = (unsigned)motion_effect * LYRIC_VARIANTS;
+    } else {
+        motion_leaving = true;
     }
+    motion_began = now;
+    motion_transition = true;
+    shake_after = now + LYRIC_ENTER_MS;
+    shake.wait_for_rest = true;
+    shake.last_sample = now;
+    shake.rest_ms = 0;
+    dirty = true;
+    aster_printf("HiFi lyric shake effect=%u return=%u", (unsigned)motion_effect, motion_leaving);
 }
 
 static const char *source_label(void)
@@ -833,10 +868,35 @@ static void lyric_page(uint32_t now)
     progress(LYRIC_PROGRESS, true);
 }
 
+static unsigned paper_layout(int cue)
+{
+    unsigned scene = 0;
+    for (int i = 0; i < cue;) {
+        int end = next_lyric_group(i);
+        for (; i < end; i++) {
+            if (lyrics.text[lyrics.cue[i].text_offset]) {
+                scene++;
+                break;
+            }
+        }
+        i = end;
+    }
+    return (unsigned)motion_effect * LYRIC_VARIANTS + scene % LYRIC_VARIANTS;
+}
+
 static void paper_tick(uint32_t now)
 {
     if (page != PAPER)
         return;
+    if (motion_transition) {
+        dirty = true;
+        if (motion_leaving && now - motion_began >= LYRIC_EXIT_MS) {
+            set_page(motion_origin);
+            return;
+        }
+        if (!motion_leaving && now - motion_began >= LYRIC_ENTER_MS)
+            motion_transition = false;
+    }
     int next = lyric_line;
     while (next >= 0 && !lyrics.text[lyrics.cue[next].text_offset]) {
         int following = next + 1;
@@ -849,18 +909,26 @@ static void paper_tick(uint32_t now)
     }
     if (next != paper_line) {
         paper_previous = paper_style;
-        paper_style = next < 0 ? 0u : (unsigned)next % 3;
+        if (next >= 0)
+            paper_style = paper_layout(lyric_line);
+        if (paper_line < 0)
+            paper_previous = paper_style;
+        paper_prepare(&lyrics, next, player.duration_ms, paper_style);
         paper_began = now;
         paper_line = next;
         dirty = true;
     }
-    unsigned sung = next < 0 ? 0 : lrc_sung_bytes(&lyrics, (unsigned)next, position());
-    if (sung != paper_sung || now - paper_began <= PAPER_TURN_MS + 50)
+    uint32_t position_ms = position();
+    if (player.state == ASTER_PLAYER_PLAYING && seeking == SEEK_IDLE) {
+        uint32_t since_poll = now - last_poll;
+        if (since_poll <= 50)
+            position_ms += since_poll;
+    }
+    if (paper_highlight(&lyrics, next, position_ms) || now - paper_began <= 650)
         dirty = true;
-    paper_sung = sung;
 }
 
-static void draw_paper(uint32_t now)
+static int draw_paper(uint32_t now)
 {
     const char *body = paper_line < 0 ? NULL : lyrics.text + lyrics.cue[paper_line].text_offset;
     const char *status = lyrics.count        ? NULL
@@ -868,8 +936,10 @@ static void draw_paper(uint32_t now)
                          : lyric_file        ? "正在读取歌词"
                          : lyric_error       ? "无法读取歌词文件"
                                              : "暂无同步歌词";
-    paper_draw(&gfx, left, top, content_w, paper_style, paper_previous, now - paper_began, body,
-               paper_sung, status);
+    lyric_transition_t transition = {motion_transition ? now - motion_began : UINT32_MAX,
+                                     motion_leaving};
+    return paper_draw(&gfx, left, top, content_w, paper_style, paper_previous, now - paper_began,
+                      body, status, transition);
 }
 
 static int current_index(void)
@@ -931,6 +1001,12 @@ static void library(void)
 
 static void draw(uint32_t now)
 {
+    if (page == PAPER) {
+        int result = draw_paper(now);
+        if (result < 0)
+            aster_errfmt("HiFi paper render %d", result);
+        return;
+    }
     switch (page) {
     case LYRICS:
         frame_chrome();
@@ -945,10 +1021,9 @@ static void draw(uint32_t now)
         library();
         break;
     case PAPER:
-        draw_paper(now);
         break;
     }
-    if (page != PAPER && message[0]) {
+    if (message[0]) {
         box(32, 271, 396, 47, 11, panel, false);
         box(32, 271, 396, 47, 11, border, true);
         text(44, 283, 372, 18, ink, message, CENTER);
@@ -1309,6 +1384,7 @@ ASTER_APP_EXPORT void aster_app_pause(void)
 ASTER_APP_EXPORT void aster_app_resume(void)
 {
     aster_app_pause();
+    paper_invalidate();
     last_poll = 0;
     dirty = true;
 }
