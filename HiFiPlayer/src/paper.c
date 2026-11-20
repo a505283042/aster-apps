@@ -4,7 +4,7 @@
 #include "paper_font.h"
 #include "lyric_layout.h"
 
-enum { DESIGN = 460, MAX_GLYPHS = 36, FP = 1024 };
+enum { DESIGN = 460, CHINESE_LAYOUT_LIMIT = 36, FP = 1024 };
 
 typedef struct {
     uint32_t base, panel, pending, ink;
@@ -62,23 +62,17 @@ static const pose_t reference[][7] = {
      {332, 276, 100, 9}},
 };
 
-typedef struct {
-    uint32_t codepoint;
-    pose_t pose;
-    uint8_t mask[PAPER_FONT_CELL * PAPER_FONT_CELL];
-} glyph_t;
-
-static glyph_t glyphs[MAX_GLYPHS];
+static lyric_glyph_t glyphs[LYRIC_LINE_CAP];
 static unsigned glyph_count;
-static bool settled_frame;
-static unsigned displayed[MAX_GLYPHS];
+static bool settled_frame, word_layout;
+static uint16_t displayed[LYRIC_LINE_CAP];
 
 void paper_invalidate(void) { settled_frame = false; }
 /* Timing covers the full LRC line, including lines painted with the system font. */
 static struct letter {
     uint32_t begin, end;
     unsigned byte_offset, progress;
-} letters[768];
+} letters[LYRIC_LINE_CAP];
 static unsigned letter_count, sung_bytes;
 enum { LIGHT_MAP = 115 };
 static struct light_map {
@@ -138,7 +132,7 @@ static uint16_t tint(uint32_t a, uint32_t b, unsigned percent)
 
 /* Bake the spotlight and the outline of the first sung character at a quarter
  * of design resolution. Crossfades then cost one blend per four pixels. */
-static void build_lights(unsigned scene, const uint8_t *mask)
+static void build_lights(unsigned scene, const uint8_t *mask, int cell)
 {
     static const point_t centers[] = {{295, 225}, {179, 253}, {212, 170},
                                       {166, 156}, {285, 275}, {235, 170}};
@@ -158,9 +152,11 @@ static void build_lights(unsigned scene, const uint8_t *mask)
             /* The ghost is tilted independently of the foreground lettering. */
             int u = 40 + ((4 * x - 276) * 72 - (4 * y - 222) * 23) / 275;
             int v = 40 + ((4 * x - 276) * 23 + (4 * y - 222) * 72) / 275;
-            if (mask && u > 0 && u < PAPER_FONT_CELL - 1 && v > 0 && v < PAPER_FONT_CELL - 1) {
-                const uint8_t *a = mask + v * PAPER_FONT_CELL + u;
-                int edge = max(max(a[-1], a[1]), max(a[-PAPER_FONT_CELL], a[PAPER_FONT_CELL])) - *a;
+            u = u * cell / PAPER_FONT_CELL;
+            v = v * cell / PAPER_FONT_CELL;
+            if (mask && u > 0 && u < cell - 1 && v > 0 && v < cell - 1) {
+                const uint8_t *a = mask + v * cell + u;
+                int edge = max(max(a[-1], a[1]), max(a[-cell], a[cell])) - *a;
                 if (edge > 0)
                     color = mix(color, halo, (unsigned)edge / 15);
             }
@@ -200,10 +196,18 @@ static void time_glyphs(const lrc_t *lyrics, unsigned line, uint32_t duration)
             start = min(140, finish / 6);
             finish -= min(110, finish / 6);
         }
-        uint32_t span = finish - start;
+        uint32_t span = finish > start ? finish - start : 0;
+        unsigned total = 0, prefix = 0;
+        if (word_layout)
+            for (unsigned j = first; j < end; j++)
+                total += glyphs[j].codepoint == ' ' ? 0 : glyphs[j].advance;
+        bool weighted = total > 0;
+        if (!weighted)
+            total = end - first;
         for (unsigned j = first; j < end; j++) {
-            letters[j].begin = start + (uint64_t)span * (j - first) / (end - first);
-            letters[j].end = start + (uint64_t)span * (j - first + 1) / (end - first);
+            letters[j].begin = start + (uint64_t)span * prefix / total;
+            prefix += weighted ? (glyphs[j].codepoint == ' ' ? 0 : glyphs[j].advance) : 1;
+            letters[j].end = start + (uint64_t)span * prefix / total;
             letters[j].progress = 0;
         }
         first = end;
@@ -261,6 +265,7 @@ static void prepare_letters(const lrc_t *lyrics, int line, uint32_t duration, un
 {
     paper_invalidate();
     glyph_count = letter_count = sung_bytes = 0;
+    word_layout = false;
     if (line < 0)
         return;
     const char *body = lyrics->text + lyrics->cue[line].text_offset;
@@ -271,28 +276,24 @@ static void prepare_letters(const lrc_t *lyrics, int line, uint32_t duration, un
             return;
         uint32_t cp = aster_utf8_cp(body + at, bytes);
         letters[count].byte_offset = at;
-        if (count < MAX_GLYPHS)
-            glyphs[count].codepoint = cp == '\t' || cp == 0x3000 ? ' ' : cp;
+        glyphs[count].codepoint = cp == '\t' || cp == 0x3000 ? ' ' : cp;
+        word_layout |= lyric_latin(cp);
         count++;
         at += bytes;
     }
     letter_count = count;
     letters[count].byte_offset = strlen(body);
+    bool bold = style >= LYRIC_VARIANTS || lyric_layout_vertical(style);
+    if (count && (word_layout || count <= CHINESE_LAYOUT_LIMIT) &&
+        paper_font_line(glyphs, count, bold)) {
+        glyph_count = count;
+        if (word_layout)
+            lyric_layout_words(style, glyphs, count);
+        else
+            place_glyphs(style);
+    } else
+        word_layout = false;
     time_glyphs(lyrics, line, duration);
-    if (!count || count > MAX_GLYPHS)
-        return;
-
-    paper_font_t font;
-    if (!paper_font_open(&font, style >= LYRIC_VARIANTS || lyric_layout_vertical(style)))
-        return;
-    unsigned i = 0;
-    while (i < count && paper_font_read(&font, glyphs[i].codepoint, glyphs[i].mask))
-        i++;
-    paper_font_close(&font);
-    if (i != count)
-        return;
-    glyph_count = count;
-    place_glyphs(style);
 }
 
 void paper_prepare(const lrc_t *lyrics, int line, uint32_t duration, unsigned style)
@@ -300,7 +301,8 @@ void paper_prepare(const lrc_t *lyrics, int line, uint32_t duration, unsigned st
     prepare_letters(lyrics, line, duration, style);
     if (style / LYRIC_VARIANTS == CAMERA_PUSH) {
         light_slot ^= 1;
-        build_lights(style, glyph_count ? glyphs[0].mask : NULL);
+        build_lights(style, glyph_count ? paper_font_mask(glyphs[0].mask_slot).alpha : NULL,
+                     paper_font_cell());
     }
 }
 
@@ -483,15 +485,15 @@ static void backdrop(const canvas_t *canvas, unsigned style, unsigned previous, 
     }
 }
 
-static unsigned sample_alpha(const uint8_t *mask, int x, int y)
+static unsigned sample_alpha(const uint8_t *mask, int cell, int x, int y)
 {
     int u = x / FP, v = y / FP;
-    if ((unsigned)u >= PAPER_FONT_CELL - 1 || (unsigned)v >= PAPER_FONT_CELL - 1)
+    if ((unsigned)u >= (unsigned)cell - 1 || (unsigned)v >= (unsigned)cell - 1)
         return 0;
     unsigned a = (x % FP) / (FP / 16), b = (y % FP) / (FP / 16);
-    const uint8_t *p = mask + v * PAPER_FONT_CELL + u;
+    const uint8_t *p = mask + v * cell + u;
     unsigned top = p[0] * (16 - a) + p[1] * a;
-    p += PAPER_FONT_CELL;
+    p += cell;
     unsigned bottom = p[0] * (16 - a) + p[1] * a;
     return (top * (16 - b) + bottom * b + 128) >> 8;
 }
@@ -502,11 +504,12 @@ typedef struct {
     bool vertical, outline;
 } brush_t;
 
-static void stamp(const canvas_t *canvas, const uint8_t *mask, float x, float y, float em,
+static void stamp(const canvas_t *canvas, paper_mask_t mask, float x, float y, float em,
                   float angle, const brush_t *brush)
 {
     int mid_x = (int)(x * FP), mid_y = (int)(y * FP);
-    float ratio = PAPER_FONT_EM * FP / em;
+    int cell = paper_font_cell();
+    float ratio = (float)(PAPER_FONT_EM * FP * cell) / (PAPER_FONT_CELL * em);
     float c = cosine(angle), s = sine(angle);
     int du = (int)(c * ratio), dv = (int)(s * ratio);
     int half = (int)((c + (s < 0 ? -s : s)) * em * PAPER_FONT_CELL / (2 * PAPER_FONT_EM)) + 2;
@@ -514,10 +517,13 @@ static void stamp(const canvas_t *canvas, const uint8_t *mask, float x, float y,
     int first_y = max(canvas->y0, (int)y - half), last_y = min(canvas->y1, (int)y + half);
     if (first_x >= last_x || first_y >= last_y)
         return;
-    int origin = (PAPER_FONT_CELL - 1) * FP / 2;
-    int edge = origin - PAPER_FONT_EM * FP / 2 + PAPER_FONT_EM * FP * brush->progress / 256;
+    int origin = (cell - 1) * FP / 2;
+    int edge = word_layout
+                   ? (mask.left * FP + (mask.right - mask.left) * FP * (int)brush->progress / 256) *
+                         cell / PAPER_FONT_CELL
+                   : origin - PAPER_FONT_EM * FP / 2 + PAPER_FONT_EM * FP * brush->progress / 256;
     if (brush->progress == 256)
-        edge = PAPER_FONT_CELL * FP;
+        edge = cell * FP;
     else if (!brush->progress)
         edge = 0;
 
@@ -527,14 +533,12 @@ static void stamp(const canvas_t *canvas, const uint8_t *mask, float x, float y,
         int v = origin + (dy * du - dx * dv) / FP;
         uint16_t *pixel = canvas->pixels + row * canvas->stride + first_x;
         for (int col = first_x; col < last_x; col++, u += du, v -= dv, pixel++) {
-            if (u < FP || v < FP || u >= (PAPER_FONT_CELL - 2) * FP ||
-                v >= (PAPER_FONT_CELL - 2) * FP)
+            if (u < 0 || v < 0 || u >= (cell - 1) * FP || v >= (cell - 1) * FP)
                 continue;
-            unsigned alpha = sample_alpha(mask, u, v);
-            if (brush->outline && alpha < 128) {
-                const uint8_t *near = mask + (v / FP) * PAPER_FONT_CELL + u / FP;
-                unsigned rim =
-                    max(max(near[-1], near[1]), max(near[-PAPER_FONT_CELL], near[PAPER_FONT_CELL]));
+            unsigned alpha = sample_alpha(mask.alpha, cell, u, v);
+            if (brush->outline && alpha < 128 && u >= FP && v >= FP) {
+                const uint8_t *near = mask.alpha + (v / FP) * cell + u / FP;
+                unsigned rim = max(max(near[-1], near[1]), max(near[-cell], near[cell]));
                 if (rim > alpha)
                     *pixel = mix(*pixel, brush->contour, (rim - alpha + 4) / 8);
             }
@@ -583,27 +587,46 @@ static void typeset(const canvas_t *canvas, unsigned style, uint32_t elapsed,
                     .ink = rgb565(p->ink),
                     .contour = tint(p->panel, p->pending, 34),
                     .coverage = (unsigned)(32.f - 3.2f * entry + .5f),
-                    .vertical = lyric_layout_vertical(style),
+                    .vertical = !word_layout && lyric_layout_vertical(style),
                     .outline = effect != FOLD_PLANES};
+    unsigned word_end = 0;
+    float word_center = 0.f, word_zoom = 0.f;
     for (unsigned i = 0; i < glyph_count; i++) {
-        const glyph_t *glyph = &glyphs[i];
+        const lyric_glyph_t *glyph = &glyphs[i];
         if (glyph->codepoint == ' ')
             continue;
         pose_t pose = glyph->pose;
-        float dx = (pose.x - 230) * scale, dy = (pose.y - 230) * scale;
+        if (word_layout && effect == CAMERA_PUSH && i >= word_end) {
+            word_end = glyph->word_end;
+            word_center = (pose.x + glyphs[word_end - 1].pose.x) * .5f;
+            unsigned sung = 0;
+            for (unsigned j = i; j < word_end; j++)
+                sung += letters[j].progress;
+            float t = (float)sung / ((word_end - i) * 256);
+            word_zoom = .14f * t * (1.f - t);
+        }
+        float fold = word_layout && effect == FOLD_PLANES
+                         ? ((glyph->row + variant) % 2 ? 18.f : -18.f) * entry
+                         : 0.f;
+        float dx = (pose.x + (pose.x - word_center) * word_zoom + fold - 230) * scale;
+        float dy = (pose.y - 230) * scale;
         float x = 230 + dx * c - dy * s + kick;
         float y = 230 + dx * s + dy * c + (effect == CUT_PAPER ? 17.f * entry : 0);
         float progress = letters[i].progress / 256.f;
-        float pulse = sine(3.14159265f * (progress < .5f ? progress : 1.f - progress));
+        float pulse =
+            word_layout ? 0.f : sine(3.14159265f * (progress < .5f ? progress : 1.f - progress));
         float angle = radians(pose.degrees + (effect == CAMERA_PUSH ? 2.8f : 1.7f) * pulse) + shift;
-        if (effect == CUT_PAPER)
-            stamp(canvas, glyph->mask, (x + 4) * ratio, (y + 5) * ratio, pose.em * scale * ratio,
-                  angle, &shadow);
+        paper_mask_t mask = paper_font_mask(glyph->mask_slot);
+        if (effect == CUT_PAPER) {
+            float offset = word_layout ? pose.em * .035f : 4.f;
+            stamp(canvas, mask, (x + offset) * ratio, (y + offset + 1.f) * ratio,
+                  pose.em * scale * ratio, angle, &shadow);
+        }
         face.progress = letters[i].progress;
-        stamp(canvas, glyph->mask, x * ratio,
-              (y - (effect == CAMERA_PUSH ? 6.f : 3.8f) * pulse) * ratio,
-              (pose.em + (effect == CAMERA_PUSH ? 7.f : 4.6f) * pulse) * scale * ratio, angle,
-              &face);
+        stamp(canvas, mask, x * ratio, (y - (effect == CAMERA_PUSH ? 6.f : 3.8f) * pulse) * ratio,
+              (pose.em * (1.f + word_zoom) + (effect == CAMERA_PUSH ? 7.f : 4.6f) * pulse) * scale *
+                  ratio,
+              angle, &face);
     }
 }
 
@@ -732,16 +755,27 @@ int paper_draw(aster_ge_t *gfx, int left, int top, int extent, unsigned style, u
     bool partial = false;
     if (settled_frame && settled) {
         int x0 = extent, y0 = extent, x1 = 0, y1 = 0;
-        for (unsigned i = 0; i < glyph_count; i++) {
-            if (letters[i].progress == displayed[i])
-                continue;
-            pose_t p = glyphs[i].pose;
-            /* Includes rotated ink, its pulse, antialias fringe and cast shadow. */
-            int pad = p.em * 3 / 4 + 14;
-            x0 = min(x0, (p.x - pad) * extent / DESIGN);
-            y0 = min(y0, (p.y - pad) * extent / DESIGN);
-            x1 = max(x1, (p.x + pad) * extent / DESIGN + 1);
-            y1 = max(y1, (p.y + pad) * extent / DESIGN + 1);
+        for (unsigned first = 0; first < glyph_count;) {
+            unsigned end = word_layout && style / LYRIC_VARIANTS == CAMERA_PUSH
+                               ? glyphs[first].word_end
+                               : first + 1;
+            bool changed = false;
+            for (unsigned i = first; i < end; i++)
+                changed |= letters[i].progress != displayed[i];
+            if (changed) {
+                for (unsigned i = first; i < end; i++) {
+                    if (glyphs[i].codepoint == ' ')
+                        continue;
+                    pose_t p = glyphs[i].pose;
+                    /* Includes the word zoom, rotation and cast shadow. */
+                    int pad = p.em * 3 / 4 + 14;
+                    x0 = min(x0, (p.x - pad) * extent / DESIGN);
+                    y0 = min(y0, (p.y - pad) * extent / DESIGN);
+                    x1 = max(x1, (p.x + pad) * extent / DESIGN + 1);
+                    y1 = max(y1, (p.y + pad) * extent / DESIGN + 1);
+                }
+            }
+            first = end;
         }
         if (x0 < x1 && y0 < y1) {
             partial = true;

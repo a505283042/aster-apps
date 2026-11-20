@@ -170,3 +170,94 @@ bool paper_font_read(const paper_font_t *font, uint32_t codepoint,
     rasterize(mask);
     return true;
 }
+
+/* Same pixel budget as the original 36 full-size masks. Only unusually diverse
+ * lines need smaller cells. Compute ink metrics before downsampling. */
+static uint8_t atlas[36 * PAPER_FONT_CELL * PAPER_FONT_CELL];
+static struct {
+    uint32_t cp;
+    uint8_t left, right, advance;
+    int8_t center_offset;
+} shapes[LYRIC_LINE_CAP];
+static int cell;
+
+int paper_font_cell(void)
+{
+    return cell;
+}
+
+paper_mask_t paper_font_mask(unsigned slot)
+{
+    return (paper_mask_t){atlas + slot * cell * cell, shapes[slot].left, shapes[slot].right};
+}
+
+static bool load_shape(paper_font_t *font, unsigned slot)
+{
+    static uint8_t full[PAPER_FONT_CELL * PAPER_FONT_CELL];
+    uint8_t *dst = atlas + slot * cell * cell;
+    uint8_t *src = cell == PAPER_FONT_CELL ? dst : full;
+    uint32_t cp = shapes[slot].cp;
+    if (!paper_font_read(font, cp, src))
+        return false;
+    int left = PAPER_FONT_CELL, right = 0;
+    for (int y = 0; y < PAPER_FONT_CELL; y++) {
+        for (int x = 0; x < PAPER_FONT_CELL; x++) {
+            if (src[y * PAPER_FONT_CELL + x] >= 24) {
+                if (x < left)
+                    left = x;
+                if (x + 1 > right)
+                    right = x + 1;
+            }
+        }
+    }
+    if (right <= left)
+        left = right = PAPER_FONT_CELL / 2;
+    shapes[slot].left = left;
+    shapes[slot].right = right;
+    shapes[slot].advance = cp == ' ' ? 22 : cp >= 0x3000 ? PAPER_FONT_EM : right - left + 5;
+    shapes[slot].center_offset = cp >= 0x3000 ? 0 : (PAPER_FONT_CELL - left - right) / 2;
+    if (src != dst) {
+        int factor = PAPER_FONT_CELL / cell;
+        for (int y = 0; y < cell; y++) {
+            for (int x = 0; x < cell; x++) {
+                unsigned sum = 0;
+                for (int dy = 0; dy < factor; dy++)
+                    for (int dx = 0; dx < factor; dx++)
+                        sum += src[(y * factor + dy) * PAPER_FONT_CELL + x * factor + dx];
+                dst[y * cell + x] = sum / (factor * factor);
+            }
+        }
+    }
+    return true;
+}
+
+bool paper_font_line(lyric_glyph_t *glyphs, unsigned count, bool bold)
+{
+    unsigned unique = 0;
+    for (unsigned i = 0; i < count; i++) {
+        unsigned slot = 0;
+        while (slot < unique && shapes[slot].cp != glyphs[i].codepoint)
+            slot++;
+        if (slot == unique)
+            shapes[unique++].cp = glyphs[i].codepoint;
+        glyphs[i].mask_slot = slot;
+    }
+    cell = PAPER_FONT_CELL;
+    while (unique * cell * cell > sizeof(atlas))
+        cell /= 2;
+    paper_font_t font;
+    if (!paper_font_open(&font, bold))
+        return false;
+    unsigned loaded = 0;
+    while (loaded < unique && load_shape(&font, loaded))
+        loaded++;
+    paper_font_close(&font);
+    if (loaded != unique)
+        return false;
+    for (unsigned i = 0; i < count; i++) {
+        unsigned slot = glyphs[i].mask_slot;
+        glyphs[i].advance = shapes[slot].advance;
+        glyphs[i].center_offset = shapes[slot].center_offset;
+    }
+    return true;
+}

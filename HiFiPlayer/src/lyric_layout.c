@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: MIT */
 #include "lyric_layout.h"
 #include "paper.h"
+#include "paper_font.h"
 
 typedef struct {
     int x0, y0, x1, y1, em, tilt;
@@ -86,4 +87,137 @@ pose_t lyric_layout_pose(unsigned scene, unsigned count, unsigned index)
     if (scene == CAMERA_PUSH * LYRIC_VARIANTS + 1)
         y += 13 * (int)(slot % 2);
     return (pose_t){x, y, em, path.tilt};
+}
+
+bool lyric_latin(uint32_t cp)
+{
+    return (cp >= 'A' && cp <= 'Z') || (cp >= 'a' && cp <= 'z') ||
+           (cp >= 0xc0 && cp <= 0x24f && cp != 0xd7 && cp != 0xf7);
+}
+
+static bool ideograph(uint32_t cp)
+{
+    return (cp >= 0x3040 && cp <= 0x9fff) || (cp >= 0xac00 && cp <= 0xd7ff) || cp >= 0x20000;
+}
+
+/* Keep an English run (including apostrophes, hyphens and punctuation) together.
+ * In mixed lyrics a Han character provides another possible line break. */
+static bool word_break(uint32_t left, uint32_t right)
+{
+    if (ideograph(right))
+        return left != '(' && left != 0x201c && left != 0x300a;
+    return ideograph(left) && (lyric_latin(right) || (right >= '0' && right <= '9'));
+}
+
+typedef struct {
+    unsigned first, end, width, gap;
+} word_t;
+
+static word_t words[LYRIC_LINE_CAP];
+
+static unsigned collect_words(lyric_glyph_t *glyphs, unsigned count)
+{
+    unsigned n = 0, gap = 0;
+    for (unsigned i = 0; i < count;) {
+        if (glyphs[i].codepoint == ' ') {
+            gap = glyphs[i].advance;
+            glyphs[i].word_end = i + 1;
+            i++;
+            continue;
+        }
+        word_t *word = &words[n++];
+        word->first = i;
+        word->width = 0;
+        word->gap = gap;
+        gap = 0;
+        do {
+            word->width += glyphs[i++].advance;
+        } while (i < count && glyphs[i].codepoint != ' ' &&
+                 !word_break(glyphs[i - 1].codepoint, glyphs[i].codepoint));
+        word->end = i;
+        for (unsigned j = word->first; j < i; j++)
+            glyphs[j].word_end = i;
+    }
+    return n;
+}
+
+static unsigned row_width(unsigned start, unsigned count, unsigned capacity, unsigned *next)
+{
+    unsigned width = words[start].width, i = start + 1;
+    while (i < count && width + words[i].gap + words[i].width <= capacity) {
+        width += words[i].gap + words[i].width;
+        i++;
+    }
+    *next = i;
+    return width;
+}
+
+static unsigned count_rows(unsigned count, unsigned capacity)
+{
+    unsigned rows = 0;
+    for (unsigned i = 0; i < count; rows++)
+        row_width(i, count, capacity, &i);
+    return rows;
+}
+
+void lyric_layout_words(unsigned scene, lyric_glyph_t *glyphs, unsigned count)
+{
+    enum { WIDTH = 388, HEIGHT = 354 };
+    const unsigned n = collect_words(glyphs, count);
+    if (!n)
+        return;
+    unsigned em = 78, rows, capacity;
+    for (;;) {
+        capacity = WIDTH * PAPER_FONT_EM / em;
+        rows = count_rows(n, capacity);
+        if (rows * (em + em / 4) <= HEIGHT || em <= 8)
+            break;
+        em -= 2;
+    }
+    /* Balance whole words across the chosen number of rows, avoiding a tiny
+     * trailing line. A single oversized word gets its own fitted row. */
+    unsigned low = 1, high = capacity;
+    while (low < high) {
+        unsigned middle = (low + high) / 2;
+        if (count_rows(n, middle) <= rows)
+            high = middle;
+        else
+            low = middle + 1;
+    }
+    const unsigned effect = scene / LYRIC_VARIANTS, variant = scene % LYRIC_VARIANTS;
+    const int step = (int)(em + em / 4);
+    for (unsigned start = 0, row = 0; start < n; row++) {
+        unsigned end, width = row_width(start, n, low, &end);
+        unsigned row_em = em;
+        if (effect == CUT_PAPER && rows > 1 && row + 1 < rows)
+            row_em = em * 86 / 100;
+        if (row_em * width > WIDTH * PAPER_FONT_EM)
+            row_em = WIDTH * PAPER_FONT_EM / width;
+        if (!row_em)
+            row_em = 1;
+        int span = (int)(row_em * width / PAPER_FONT_EM);
+        if (span > WIDTH)
+            span = WIDTH;
+        int x = (460 - span) / 2;
+        if (effect == CUT_PAPER)
+            x += ((int)((row + variant) % 2) * 2 - 1) * (WIDTH - span) / 5;
+        const int center_y = 230 + (2 * (int)row + 1 - (int)rows) * step / 2;
+        const int tilt = effect == CUT_PAPER     ? -3
+                         : effect == FOLD_PLANES ? ((row + variant) % 2 ? 4 : -4)
+                                                 : 0;
+        unsigned cursor = 0;
+        for (unsigned w = start; w < end; w++) {
+            if (w > start)
+                cursor += words[w].gap;
+            for (unsigned i = words[w].first; i < words[w].end; i++) {
+                lyric_glyph_t *g = &glyphs[i];
+                int offset = (int)(cursor + g->advance / 2) + g->center_offset;
+                int cx = x + offset * span / (int)width;
+                g->pose = (pose_t){cx, center_y + (cx - 230) * tilt / 57, row_em, tilt};
+                g->row = row;
+                cursor += g->advance;
+            }
+        }
+        start = end;
+    }
 }

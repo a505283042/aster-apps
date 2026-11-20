@@ -1,9 +1,10 @@
 # Aster 音乐
 
-Hi-Fi 播放器 0.4.18，按 FAKE POD NANO PRO 的 460×460 方屏设计，最低固件 ABI 4.5。MP3 播放需要带 MP3 解码的固件。蓝牙连接由系统下拉设置管理。
+Hi-Fi 播放器 0.4.19，按 FAKE POD NANO PRO 的 460×460 方屏设计，最低固件 ABI 4.5。MP3 播放需要带 MP3 解码的固件。蓝牙连接由系统下拉设置管理。
 
 - 在播放页从封面或曲目信息区域向右滑进入歌词，向左滑进入曲库。反向滑动回到播放页。
-- FAKE POD NANO PRO 上，在播放页、歌词页或曲库摇一摇，会随机进入「剪纸换幕」「折面换向」或「整句推镜」。再摇一次回到刚才的页面。连续两次进入会选到不同效果。每种效果有六组逐句构图，左滑可随时回播放页。增强 LRC 使用 `<mm:ss.xx>` 时间戳推进高亮，普通 LRC 在行时间范围内估算逐字进度。超长句和艺术字库未覆盖的字使用系统字体换行显示。
+- FAKE POD NANO PRO 上，在播放页、歌词页或曲库摇一摇，会随机进入「剪纸换幕」「折面换向」或「整句推镜」。再摇一次回到刚才的页面。连续两次进入会选到不同效果。每种效果有六组逐句构图，左滑可随时回播放页。
+- 三种动效都整句显示英文，按单词换行。英文长句沿用艺术字，中英混排保留英文单词。增强 LRC 按时间戳推进高亮，普通 LRC 在句内估算；手机蓝牙发来的歌词按句换幕。艺术字库缺字时使用系统字体。
 - 播放页等比完整显示封面。深海蓝背景和冰蓝按钮在所有歌曲间保持一致，封面周围的光晕少量取色。右下角是上一首、下一首和大号播放／暂停键，音量和进度位于左侧。
 - 将同名的 JPG、JPEG、PNG 或 BMP 放在歌曲旁边即可指定封面。也支持读取 MP3 和 WAV 的 ID3 封面、FLAC 的内嵌封面。找不到可用封面时显示同色系的抽象图案。
 - 本地歌曲旁边可以放同名的 `.lrc`。例如 `music/稻香-周杰伦.mp3` 配 `music/稻香-周杰伦.lrc`。支持 UTF-8、UTF-16 和 GBK，支持毫秒时间戳、同一行多个时间戳以及 `[offset]`。当前歌词按字宽换行，拖动进度条时预览目标句，暂停时保留当前句。GBK 映射表随包安装，显示使用系统字库。
@@ -22,3 +23,11 @@ Hi-Fi 播放器 0.4.18，按 FAKE POD NANO PRO 的 460×460 方屏设计，最�
 `audio/demo.flac` 是 48 kHz/24 位双声道原创试听旋律，`art/moonlight.bmp` 是原创默认封面，两者均采用 MIT 授权。
 
 进度条支持整条触摸区域按下与拖动，拖动时预览目标时间，松手提交跳转；音乐自然结束后仍可拖到目标位置继续播放。
+
+## 动态歌词的设计参考与字体
+
+「剪纸换幕」「折面换向」「整句推镜」的视觉设计参考了 Folia（chthollyphile/folia-major）的「商籁」和「凝彩」，尤其是随歌词切句改变画面构图、让文字参与转场的做法。Aster 针对 460×460 方屏用 C 独立实现了整句排版、逐词高亮和动效绘制。感谢 Folia 作者和贡献者。[Folia 项目](https://github.com/chthollyphile/folia-major) · [Folia 许可证](https://github.com/chthollyphile/folia-major/blob/main/LICENSE)
+
+随 APP 分发的艺术字轮廓来自 Noto Serif SC（`paper-serif.bin`）和 Noto Sans SC（`paper-bold.bin`），均采用 SIL Open Font License 1.1。两份字体的版权声明和许可证随安装包提供。[Noto Serif SC 来源](https://github.com/google/fonts/tree/main/ofl/notoserifsc) · [衬线字体许可](text/paper-serif-OFL.txt) · [Noto Sans SC 来源](https://github.com/google/fonts/tree/main/ofl/notosanssc) · [粗体许可](text/paper-bold-OFL.txt)
+
+重新生成字库时，构建脚本使用 fontTools 提取字体轮廓；设备端由播放器直接绘制这些轮廓。[字库生成脚本](tools/build_paper_font.py) · [fontTools 项目](https://github.com/fonttools/fonttools)

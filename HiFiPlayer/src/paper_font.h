@@ -4,6 +4,7 @@
 
 #include <aster/fs.h>
 #include <stdbool.h>
+#include "lyric_layout.h"
 
 enum { PAPER_FONT_CELL = 80, PAPER_FONT_EM = 76 };
 
@@ -17,5 +18,14 @@ bool paper_font_open(paper_font_t *font, bool bold);
 void paper_font_close(paper_font_t *font);
 bool paper_font_read(const paper_font_t *font, uint32_t codepoint,
                      uint8_t mask[PAPER_FONT_CELL * PAPER_FONT_CELL]);
+
+/* All glyphs in a sentence share this atlas. Repeated letters share a mask. */
+typedef struct {
+    const uint8_t *alpha;
+    uint8_t left, right;
+} paper_mask_t;
+bool paper_font_line(lyric_glyph_t *glyphs, unsigned count, bool bold);
+paper_mask_t paper_font_mask(unsigned slot);
+int paper_font_cell(void);
 
 #endif
