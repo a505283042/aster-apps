@@ -48,7 +48,7 @@ def main():
     work.mkdir(parents=True)
     sys.path[:0] = [str(a.sdk / 'tools'), str(ROOT)]
     import setup_server, static_distribution
-    from StoreServer.server import publish, Store
+    from StoreServer.server import ast_metadata, publish, Store
 
     channel = static_distribution.source_urls(a.repository, a.tag, a.origin)[1]
     profiles = [
@@ -83,22 +83,19 @@ def main():
             channel,
             [screen],
         )
-        for project in selected:
-            if project.startswith('sdk:'):
-                raise ValueError('Publication catalog accepts aster-apps projects only')
-            root = ROOT
-            app = (root / project).resolve(strict=True)
-            if not app.is_relative_to(root):
-                raise ValueError('APP path leaves the allowed project root')
-            config = tomllib.loads((app / 'store.toml').read_text(encoding='utf-8-sig'))
-            variants = [
-                v for v in config['variants'] if v['target'] == target and board in v['boards']
-            ]
-            if not variants:
+
+    for project in selected:
+        if project.startswith('sdk:'):
+            raise ValueError('Publication catalog accepts aster-apps projects only')
+        root = ROOT
+        app = (root / project).resolve(strict=True)
+        if not app.is_relative_to(root):
+            raise ValueError('APP path leaves the allowed project root')
+        config = tomllib.loads((app / 'store.toml').read_text(encoding='utf-8-sig'))
+        for v in config['variants']:
+            target = v['target']
+            if not any(t == target and (not v.get('boards') or b in v['boards']) for t, b, _ in profiles):
                 continue
-            if len(variants) != 1:
-                raise ValueError('Ambiguous board/target variant')
-            v = variants[0]
             if not a.skip_build:
                 if project == 'StoreDemo':
                     subprocess.run([sys.executable, str(app / 'tools/prepare.py')], check=True)
@@ -112,14 +109,18 @@ def main():
                         *(['--hardware', v['hardware']] if v.get('hardware') else []),
                         '--aot',
                     ],
-                    env=environment | {'ASTER_WORKSPACE': str(app)},
+                    env=os.environ | {'ASTER_WORKSPACE': str(app)},
                     check=True,
                 )
             package = (app / v['package']).resolve(strict=True)
             resources = (app / v['resources']).resolve(strict=True) if v.get('resources') else None
             if not package.is_relative_to(app) or (resources and not resources.is_relative_to(app)):
                 raise ValueError('Variant paths must stay inside the APP project')
-            publish(work / 'store', package, [board], resources, v.get('screens'))
+            metadata = ast_metadata(package)
+            if metadata['id'] != config['id'] or metadata['target'] != target:
+                raise ValueError('Compiled package does not match variant id/target')
+            publish(work / 'store', package, v.get('boards'), resources, v.get('screens'),
+                    verified=v.get('verified'))
     store = Store(work / 'store')
     icons = work / 'store/icons'
     icons.mkdir(parents=True)

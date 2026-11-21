@@ -15,7 +15,7 @@ python -m StoreServer serve --host 0.0.0.0 --port 9080
 
 ## 发布约定
 
-每个应用工程保存 `app.toml`、源码和素材转换工具；生成的程序在 `dist/<target>`，资源在 `dist/resources`。工程内 `store.toml` 声明已验证的变体，示例见 [StoreDemo/store.toml](../StoreDemo/store.toml)。资源目录的相对路径会映射到应用的 `/assets`。存档写 `/data`。
+每个应用工程保存 `app.toml`、源码和素材转换工具；生成的程序在 `dist/<target>`，资源在 `dist/resources`。工程内 `store.toml` 声明发布变体和可选的实测记录，示例见 [StoreDemo/store.toml](../StoreDemo/store.toml)。资源目录的相对路径会映射到应用的 `/assets`。存档写 `/data`。
 
 也可直接发布：
 
@@ -23,13 +23,21 @@ python -m StoreServer serve --host 0.0.0.0 --port 9080
 python -m StoreServer publish StoreDemo/dist/riscv/aster.store.demo.ast --board osptek-p4-st7102 --screen 480x480 --resources StoreDemo/dist/resources
 ```
 
-必须明确开发板白名单；相同 CPU 不代表屏幕、内存和外设都适配。 板 ID 应以设备上报为准，例如 lckfb 实机为 `aster.esp32s3.lckfb`，不是硬件配置文件的短名 `lckfb-s3` 或 CPU 目标 `xtensa`。`--board`、`--screen` 可重复指定。服务器读取 AST 中的 ID、版本、ABI、AOT 后端及能力要求，不凭文件名猜测。已有项目需完成资源路径迁移和目标板验证后再添加发布配置。
+服务器从安装包读取 AOT 架构、最低 ABI、必需能力和可选的 `supported_boards`。`store.toml` 中的 `boards` 或命令行 `--board` 可进一步缩小发布范围。两处都省略或留空时，通用包对满足架构、ABI、能力和屏幕条件的设备可见。板型 ID 取设备上报的原值，例如 `aster.esp32s3.lckfb`。
+
+实机验证后，可在对应的 `[[variants]]` 内增加一行：
+
+```toml
+verified = { version = "0.2.1", boards = ["aster.esp32s3.lckfb"] }
+```
+
+直接发布单个安装包时可传 `--verified-board`，多个板型可重复指定。验证记录按发布摘要保存，允许给同一份包和资源补记实测结果。工程配置中的版本号必须对应当前包，新版本需要自己的实测记录。未记录的兼容设备仍可下载。
 
 发布会复制程序与资源，生成 SHA-256 摘要定位的不可变快照。相同 ID/版本/目标/重叠开发板不能发布不同内容；修改程序或资源后应更新应用版本。最多 4096 个资源文件、总计 1 GiB；拒绝符号链接、路径穿越和跨平台不安全文件名。生成的数据不提交 Git。
 
 ## HTTP 接口
 
-设备参数包含 `board`、`target`、打包整数 `abi`、能力位掩码 `features`、`width`、`height`。列表、发布详情、文件下载都会检查兼容性；未知板不会得到任意版本。
+设备参数包含 `board`、`target`、打包整数 `abi`、能力位掩码 `features`、`width`、`height`。列表、发布详情、文件下载都会检查兼容性；符合条件的新板也能下载通用包。
 
 - `GET /v1/catalog?...&page=0`：兼容应用目录，单页最多 8 个，同一应用仅显示最新兼容版本。
 - `GET /v1/releases/<摘要>?...&page=0`：程序及资源文件清单，含大小和 SHA-256，单页最多 8 个。

@@ -11,7 +11,7 @@
 typedef struct {
     char id[64], name[96], release[65], version[24], description[384], permissions[160],
         icon_sha[65], installed_version[24];
-    int installed, install_state;
+    int installed, install_state, verified;
     uint32_t bytes, count, icon_bytes, icon_handle;
     int icon_state;
 } entry;
@@ -409,6 +409,8 @@ static int read_catalog(void)
             return -1;
         if (static_base[0] && verify_metadata(at, e))
             return -1;
+        uint32_t verified = 0;
+        e->verified = number(at, "verified", &verified) == 0 && verified == 1;
         if (text(at, "description", e->description, sizeof(e->description)) < 0)
             copystr(e->description, "此应用未提供简介。");
         int icon = json_key(&doc, at, "icon");
@@ -1198,6 +1200,14 @@ static void fit_label(int x, int y, unsigned size, uint16_t color, const char *t
     label(x, y, size, color, out);
 }
 
+static void permission_heading(const entry *e, int y, unsigned size)
+{
+    label(18, y, size, muted, "所需权限");
+    const char *tested = e->verified ? "本机型已实测" : "暂无本机型实测记录";
+    unsigned chars = e->verified ? 6 : 9;
+    label(ge.w - 18 - chars * size, y, size, e->verified ? blue : muted, tested);
+}
+
 static int action_ready(const entry *e)
 {
     return !network_busy() && !cleanup[0] && !equals(e->id, "aster.store") &&
@@ -1531,7 +1541,7 @@ static void draw_portrait(void)
         aster_snprintf(s, sizeof(s), "v%s · %s", e->version, size);
         fit_label(60, 94, 11, muted, s, ge.w - 72);
         paragraph(122, 13, e->description, 3);
-        label(18, 181, 11, muted, "所需权限");
+        permission_heading(e, 181, 11);
         paragraph(201, 11, e->permissions[0] ? e->permissions : "无额外权限", 2);
         if (e->installed) {
             aster_snprintf(s, sizeof(s), "本机 %s · %s", e->installed_version, install_status(e));
@@ -1637,7 +1647,7 @@ static void draw_compact(void)
             aster_snprintf(s, sizeof(s), "v%s · %s · %u 个文件", e->version, size, e->count);
         label(70, 84, 11, muted, s);
         paragraph(105, 12, e->description, 2);
-        label(18, 140, 10, muted, "所需权限");
+        permission_heading(e, 140, 10);
         paragraph(154, 11, e->permissions[0] ? e->permissions : "无额外权限", 2);
         button(12, bottom, 62, 36, "返回", 1);
         button(80, bottom, 62, 36, "打开", is_installed(e));
@@ -1770,7 +1780,7 @@ static void draw(void)
             label(18, y, 16, ink, row);
             y += 25;
         }
-        label(18, y + 12, 14, muted, "所需权限");
+        permission_heading(e, y + 12, 14);
         label(18, y + 38, 12, ink, e->permissions[0] ? e->permissions : "无额外权限");
         if (ge.h >= 400) {
             if (e->installed)

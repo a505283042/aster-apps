@@ -5,4 +5,5 @@ id = "aster.hifi"
 target = "riscv"
 package = "dist/riscv/aster.hifi.ast"
 boards = ["fakepod-s31"]
+verified = { version = "0.4.27", boards = ["fakepod-s31"] }
 screens = [[460, 460]]

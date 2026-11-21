@@ -8,10 +8,11 @@ import urllib.request
 from pathlib import Path
 from urllib.parse import urlencode
 from http.server import ThreadingHTTPServer
-from .server import publish, Store, handler, relative, package_icon, incompatibility
+from unittest.mock import patch
+from .server import ast_metadata, publish, Store, handler, relative, package_icon, incompatibility
 
 
-def package(path, target=2, version="1.0.0", icon=None):
+def package(path, target=2, version="1.0.0", icon=None, **fields):
     manifest = json.dumps(
         {
             "id": "test.store.demo",
@@ -19,6 +20,7 @@ def package(path, target=2, version="1.0.0", icon=None):
             "version": version,
             "abi": {"min": "4.1", "target": "4.2.0"},
             "requires": ["display", "touch"],
+            **fields,
         }
     ).encode()
     mo, wo = 64, (64 + len(manifest) + 3) & ~3
@@ -145,6 +147,57 @@ class ServerTest(unittest.TestCase):
         self.assertEqual(incompatibility(info, portrait), [])
         self.assertIn("screen", incompatibility(info, portrait | {"height": 480}))
         self.assertIn("aot_target", incompatibility(info, portrait | {"target": "xtensa"}))
+
+    def test_package_boards_guard_catalog_and_direct_download(self):
+        package(self.pkg, version="1.0.1", supported_boards=["prototype.1"])
+        key = publish(self.data, self.pkg)
+        with self.get("/v1/catalog", self.dev | {"board": "prototype.1"}) as response:
+            self.assertEqual(json.load(response)["items"][0]["release"], key)
+        with self.get("/v1/catalog") as response:
+            self.assertEqual(json.load(response)["items"][0]["release"], self.key)
+        with self.get(f"/v1/releases/{key}/files/0") as response:
+            self.assertEqual(response.status, 409)
+        with self.assertRaisesRegex(ValueError, "exceed package"):
+            publish(self.data, self.pkg, ["osptek-p4-st7102"])
+        with self.assertRaisesRegex(ValueError, "verified boards exceed"):
+            publish(self.data, self.pkg, verified={"version": "1.0.1", "boards": ["wrong-board"]})
+
+    def test_generic_release_and_independent_versioned_verification(self):
+        package(self.pkg, version="1.0.1")
+        key = publish(self.data, self.pkg)
+        tested = {"version": "1.0.1", "boards": ["prototype.1"]}
+        self.assertEqual(publish(self.data, self.pkg, verified=tested), key)
+        for board, verified in (("prototype.1", 1), ("new-device", 0)):
+            dev = self.dev | {"board": board}
+            with self.get("/v1/catalog", dev) as response:
+                item = json.load(response)["items"][0]
+                self.assertEqual((item["release"], item["verified"]), (key, verified))
+            with self.get(f"/v1/releases/{key}", dev) as response:
+                self.assertEqual(json.load(response)["boards"], [board])
+        package(self.pkg, version="1.0.2")
+        publish(self.data, self.pkg, verified=tested)
+        with self.get("/v1/catalog", self.dev | {"board": "prototype.1"}) as response:
+            self.assertEqual(json.load(response)["items"][0]["verified"], 0)
+
+    def test_republish_old_board_specific_release_keeps_its_id(self):
+        board = "prototype.1"
+        package(self.pkg, version="1.0.1", supported_boards=[board])
+        legacy = ast_metadata(self.pkg)
+        del legacy["supported_boards"]
+        with patch(__package__ + ".server.ast_metadata", return_value=legacy):
+            original = publish(self.data, self.pkg, [board])
+        tested = {"version": "1.0.1", "boards": [board]}
+        self.assertEqual(publish(self.data, self.pkg, verified=tested), original)
+        store = Store(self.data)
+        self.assertEqual(store.releases[original]["supported_boards"], [board])
+        self.assertEqual(store.verified_boards(original), [board])
+
+    def test_rejects_requirements_that_firmware_cannot_read(self):
+        for requirements in (["display"] * 9, [{}]):
+            with self.subTest(requirements=requirements):
+                package(self.pkg, version="1.0.1", requires=requirements)
+                with self.assertRaisesRegex(ValueError, "capability requirement"):
+                    publish(self.data, self.pkg)
 
     def test_range_head_and_integrity(self):
         path = f"/v1/releases/{self.key}/files/1"

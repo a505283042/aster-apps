@@ -22,6 +22,7 @@ from urllib.parse import parse_qs, urlsplit
 
 ROOT = Path(__file__).resolve().parent
 ID = re.compile(r"[a-zA-Z0-9][a-zA-Z0-9_.-]{0,62}\Z")
+BOARD_ID = re.compile(r"[a-zA-Z0-9_.-]{1,39}\Z")
 DIGEST = re.compile(r"[a-f0-9]{64}\Z")
 BACKENDS = {0: "wasm", 1: "xtensa", 2: "riscv", 3: "thumbv7", 4: "thumbv8", 5: "x86_64"}
 FEATURES = {
@@ -92,6 +93,14 @@ def version(text):
     return parts + (0,) * (3 - len(parts))
 
 
+def board_list(values):
+    if not isinstance(values, list) or any(
+        not isinstance(b, str) or not BOARD_ID.fullmatch(b) for b in values
+    ):
+        raise ValueError("invalid list of board IDs")
+    return sorted(set(values))
+
+
 def ast_metadata(path):
     """Read bounded metadata without loading code/resources into memory."""
     size = path.stat().st_size
@@ -122,8 +131,14 @@ def ast_metadata(path):
         raise ValueError("package ABI descriptor missing")
     minimum = version(abi.get("min", ""))
     required = manifest.get("requires", [])
-    if not isinstance(required, list) or any(x not in FEATURES for x in required):
+    if not isinstance(required, list) or len(required) > 8 or any(
+        not isinstance(name, str) or name not in FEATURES for name in required
+    ):
         raise ValueError("unsupported capability requirement")
+    declared = manifest.get("supported_boards", [])
+    supported = board_list(declared)
+    if len(declared) > 8:
+        raise ValueError("package declares more than eight supported boards")
     return {
         "id": manifest["id"],
         "name": manifest.get("name", manifest["id"]),
@@ -132,19 +147,32 @@ def ast_metadata(path):
         "abi_target": list(version(abi.get("target", ""))),
         "target": BACKENDS[target],
         "requires": required,
+        **({"supported_boards": supported} if supported else {}),
         "permissions": manifest.get("permissions", []),
         "description": manifest.get("description", ""),
         "category": manifest.get("category", "tool"),
     }
 
 
-def publish(data, package, boards, resources=None, screens=None):
+def publish(data, package, boards=None, resources=None, screens=None, *, verified=None):
     """Freeze one target build and its independent resource tree atomically."""
     package = package.resolve(strict=True)
     info = ast_metadata(package)
-    if not boards or any(not ID.fullmatch(b) for b in boards):
-        raise ValueError("an explicit nonempty board allowlist is required")
-    info.update(schema=1, boards=sorted(set(boards)), screens=screens or [], files=[])
+    # The package digest already covers its board restrictions. Keep release.json
+    # compatible with existing immutable same-version releases.
+    declared = info.pop("supported_boards", [])
+    audience = board_list(boards if boards is not None else [])
+    if audience and declared and not set(audience).issubset(declared):
+        raise ValueError("publication boards exceed package supported_boards")
+    audience = audience or declared
+    evidence = None
+    if verified is not None:
+        tested = board_list(verified["boards"])
+        if version(verified["version"]) == version(info["version"]):
+            if audience and not set(tested).issubset(audience):
+                raise ValueError("verified boards exceed the release audience")
+            evidence = tested
+    info.update(schema=1, boards=audience, screens=screens or [], files=[])
     releases = data / "releases"
     releases.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="publish-", dir=data) as tmp:
@@ -190,7 +218,7 @@ def publish(data, package, boards, resources=None, screens=None):
                 old["id"] == info["id"]
                 and old["version"] == info["version"]
                 and old["target"] == info["target"]
-                and set(old["boards"]) & set(info["boards"])
+                and (not old["boards"] or not audience or set(old["boards"]).intersection(audience))
                 and existing.parent.name != identity
             ):
                 raise ValueError("published versions are immutable; use a new APP version")
@@ -199,6 +227,13 @@ def publish(data, package, boards, resources=None, screens=None):
         if not dest.exists():
             os.rename(staging, dest)
             # TemporaryDirectory tolerates the renamed staging root.
+        if evidence is not None:
+            checks = data / "verification"
+            checks.mkdir(exist_ok=True)
+            with tempfile.TemporaryDirectory(dir=checks) as tmp_check:
+                note = Path(tmp_check) / "boards.json"
+                note.write_bytes(encode(evidence))
+                note.replace(checks / (identity + ".json"))
         return identity
 
 
@@ -277,7 +312,7 @@ def device(query):
         return values[0]
 
     board = one("board")
-    if not ID.fullmatch(board):
+    if not BOARD_ID.fullmatch(board):
         raise ValueError("invalid board")
     result = {"board": board, "target": one("target")}
     if result["target"] not in BACKENDS.values():
@@ -301,7 +336,8 @@ def incompatibility(info, dev):
     reasons = []
     abi = dev["abi"]
     current = [abi >> 16, (abi >> 8) & 255, abi & 255]
-    if dev["board"] not in info["boards"]:
+    if any(allowed and dev["board"] not in allowed
+           for allowed in (info["boards"], info.get("supported_boards", []))):
         reasons.append("board")
     if dev["target"] != info["target"]:
         reasons.append("aot_target")
@@ -344,6 +380,9 @@ class Store:
                 p = path.parent / "payload" / str(f["index"])
                 if p.is_symlink() or p.stat().st_size != f["bytes"] or sha_file(p) != f["sha256"]:
                     raise ValueError("release payload integrity failure")
+            # Older publishers only wrote the configured distribution audience.
+            # The immutable package remains authoritative for its own restrictions.
+            info["supported_boards"] = ast_metadata(path.parent / "payload/0").get("supported_boards", [])
             self.releases[key] = info
 
     def catalog(self, dev):
@@ -367,10 +406,15 @@ class Store:
                 "bytes": info["total_bytes"],
                 "file_count": len(info["files"]),
                 "permissions": info["permissions"],
+                "verified": int(dev["board"] in self.verified_boards(key)),
                 "icon": self.icon_metadata(key),
             }
             for key, info in sorted(newest.values(), key=lambda x: x[1]["id"])
         ]
+
+    def verified_boards(self, key):
+        note = self.root / "verification" / (key + ".json")
+        return board_list(json.loads(note.read_bytes())) if note.is_file() else []
 
     def icon(self, key):
         with self.lock:
@@ -469,7 +513,7 @@ def handler(store):
                                 "release": key,
                                 "id": info["id"],
                                 "version": info["version"],
-                                "boards": info["boards"],
+                                "boards": info["boards"] or [dev["board"]],
                                 "target": info["target"],
                                 "abi_min": info["abi_min"],
                                 "requires": info["requires"],
@@ -539,7 +583,8 @@ def main():
     commands = parser.add_subparsers(dest="command", required=True)
     pub = commands.add_parser("publish")
     pub.add_argument("package", type=Path)
-    pub.add_argument("--board", action="append", required=True)
+    pub.add_argument("--board", action="append", help="Narrow the package audience, repeatable")
+    pub.add_argument("--verified-board", action="append", help="Board tested with this release, repeatable")
     pub.add_argument("--resources", type=Path)
     pub.add_argument("--screen", action="append", help="exact WIDTHxHEIGHT, repeatable")
     proj = commands.add_parser("publish-project")
@@ -565,14 +610,18 @@ def main():
         info = ast_metadata(package)
         if info["id"] != config["id"] or info["target"] != args.target:
             parser.error("project identity/target does not match compiled package")
-        print(publish(args.data, package, v["boards"], resources, v.get("screens")))
+        print(publish(args.data, package, v.get("boards"), resources, v.get("screens"),
+                      verified=v.get("verified")))
     elif args.command == "publish":
         screens = []
         for item in args.screen or []:
             if not re.fullmatch(r"[1-9]\d{0,3}x[1-9]\d{0,3}", item):
                 parser.error("screen must be WIDTHxHEIGHT")
             screens.append(list(map(int, item.split("x"))))
-        print(publish(args.data, args.package, args.board, args.resources, screens))
+        verified = None
+        if args.verified_board:
+            verified = {"version": ast_metadata(args.package)["version"], "boards": args.verified_board}
+        print(publish(args.data, args.package, args.board, args.resources, screens, verified=verified))
     else:
         store = Store(args.data)
         httpd = ThreadingHTTPServer((args.host, args.port), handler(store))

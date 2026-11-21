@@ -33,6 +33,7 @@ const server = http.createServer((req, res) => {
             bytes: program.length + resource.length,
             file_count: 2,
             description: '下载速度和大小单位验证',
+            ...(u.searchParams.get('width') === '480' ? {verified: 1} : {}),
             permissions: []
           }
         ]
@@ -114,6 +115,7 @@ fs.mkdirSync(output, { recursive: true });
   for (const [width, height] of [
     [240, 320],
     [320, 240],
+    [460, 460],
     [480, 480]
   ]) {
     const selected = {
@@ -270,6 +272,7 @@ fs.mkdirSync(output, { recursive: true });
       tap(h, 30, (width < height && width < 320) || height < 300 ? 90 : 130);
       await frames(h);
       assert(texts.some(t => t.includes(' MB')));
+      assert(texts.includes(width === 480 ? '本机型已实测' : '暂无本机型实测记录'));
       tap(h, width - 35, listBottom + 12);
       const end = Date.now() + 10000;
       while (Date.now() < end && !texts.some(t => /速度 [1-9][0-9.]* KB\/s/.test(t))) {

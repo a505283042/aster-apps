@@ -39,7 +39,7 @@ aster/
 
 ## 构建
 
-商城发布约定见 [应用与资源规划](docs/app-store-plan.zh-CN.md)。新工程可用 `store.toml` 声明已验证的板级变体；编译包与生成资源分别放在 `dist/<target>`、`dist/resources`。服务端由 APPS 根目录执行 `python -m StoreServer serve`，无须启动固件或 SDK。
+商城发布约定见 [应用与资源规划](docs/app-store-plan.zh-CN.md)。新工程可在 `app.toml` 声明所需能力和适用板型，在 `store.toml` 记录各版本实测的板型；编译包与生成资源分别放在 `dist/<target>`、`dist/resources`。服务端由 APPS 根目录执行 `python -m StoreServer serve`，无须启动固件或 SDK。
 
 现有六个应用的 P4 构建、资源迁移与发布步骤见 [商城应用构建](docs/market-apps.zh-CN.md)。
 
