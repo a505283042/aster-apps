@@ -43,20 +43,20 @@ int main(void)
     player.state = ASTER_PLAYER_PLAYING;
     seeking = SEEK_IDLE;
     camera_cut_ms = 80;
-    assert(camera_cue(1099) == -1);
-    assert(camera_cue(1100) == 0);
+    assert(timed_cue(1099, camera_cut_ms) == -1);
+    assert(timed_cue(1100, camera_cut_ms) == 0);
     paper_line = lyric_line = 0;
     camera_cut_ms = 50;
-    assert(camera_cue(1110) == 0); /* A faster measurement cannot undo a visible cut. */
+    assert(timed_cue(1110, camera_cut_ms) == 0); /* A faster measurement cannot undo a visible cut. */
     assert(camera_age(1180) == 0);
     assert(camera_age(1200) == 20);
-    assert(camera_position(1500, 0) == 5000);
+    assert(lyric_position(1500, 0) == 5000);
     player.state = ASTER_PLAYER_PAUSED;
-    assert(camera_cue(1500) == -1 && camera_age(1500) == 0);
+    assert(timed_cue(1500, camera_cut_ms) == -1 && camera_age(1500) == 0);
     player.state = ASTER_PLAYER_PLAYING;
     seek_position = 9200;
     seeking = SEEK_DRAG;
-    assert(camera_cue(1500) == 1 && camera_position(1500, 80) == 9200);
+    assert(timed_cue(1500, camera_cut_ms) == 1 && lyric_position(1500, 80) == 9200);
     paper_line = 1;
     assert(camera_age(1500) == 220);
     seek_position = 15020;
@@ -64,9 +64,24 @@ int main(void)
     seeking = SEEK_IDLE;
     player.mode = ASTER_PLAYER_BLUETOOTH;
     paper_began = 1350;
-    assert(camera_position(1500, 80) == player.position_ms && camera_age(1500) == 150);
+    assert(lyric_position(1500, 80) == player.position_ms && camera_age(1500) == 150);
     player.mode = ASTER_PLAYER_LOCAL;
     player.position_ms = player.duration_ms - 20;
-    assert(camera_position(1500, 100) == player.duration_ms);
+    assert(lyric_position(1500, 100) == player.duration_ms);
+    /* The ordinary page uses the same absolute clock at the start and end
+     * of a track. Presentation and polling delays never accumulate. */
+    player.duration_ms = 300000;
+    lyrics.offset_ms = 0;
+    for (unsigned minute = 0; minute < 4; minute++) {
+        unsigned base = 60000 * minute;
+        player.position_ms = base + 500;
+        player_sample_at = base + 900;
+        lyrics.cue[0].time_ms = base + 670;
+        lyrics.cue[1].time_ms = base + 700;
+        lyric_line = -1;
+        assert(timed_cue(base + 979, 90) == -1);
+        assert(timed_cue(base + 980, 90) == 0);
+        assert(timed_cue(base + 1010, 90) == 1);
+    }
     return 0;
 }

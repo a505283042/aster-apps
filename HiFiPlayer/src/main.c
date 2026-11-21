@@ -71,6 +71,9 @@ static int volume, library_page, track_count, scan_error;
 static bool dirty, library_scanned;
 static enum page page = PLAYBACK;
 static char tracks[TRACK_LIMIT][248], current_file[256], queued_file[256];
+static char playing_track[sizeof(current_file)];
+static bool start_busy;
+static uint32_t start_retry_until;
 static char message[128];
 static uint32_t message_until;
 
@@ -92,11 +95,11 @@ static bool lyric_animating;
 static int paper_line = -1;
 static unsigned paper_previous, paper_style;
 static uint32_t paper_began;
-/* The rasterizer presents synchronously. Predict when the cut will be seen
- * from the measured cost of preparing and submitting previous camera frames. */
-enum { CAMERA_MAX_LEAD_MS = 100 };
+/* Predict when a lyric will be visible from the cost of presenting it.
+ * All estimates start at the latest absolute audio position. */
+enum { LYRIC_MAX_LEAD_MS = 100 };
 static uint32_t player_sample_at, camera_cut_ms = 80, camera_draw_ms;
-static uint32_t camera_prepare_ms;
+static uint32_t camera_prepare_ms, lyric_page_draw_ms;
 static bool camera_new_frame;
 static unsigned live_scene, rendered_live_scene;
 static enum page motion_origin = PLAYBACK;
@@ -308,13 +311,17 @@ static void notice(const char *value)
     dirty = true;
 }
 
-static int control(uint32_t command, uint32_t value, const char *path)
+static int player_command(uint32_t command, uint32_t value, const char *path)
 {
     aster_player_request_t request = {
         .size = sizeof(request), .version = 1, .command = command, .value = value};
     if (path)
         aster_snprintf(request.path, sizeof(request.path), "%s", path);
-    int result = aster_player_control(&request, sizeof(request));
+    return aster_player_control(&request, sizeof(request));
+}
+
+static int report_control(int result)
+{
     if (result == ASTER_EBUSY)
         notice("音频正忙，请稍后再试");
     else if (result == ASTER_ESTATE && bluetooth_input())
@@ -327,6 +334,11 @@ static int control(uint32_t command, uint32_t value, const char *path)
         notice(value_text);
     }
     return result;
+}
+
+static int control(uint32_t command, uint32_t value, const char *path)
+{
+    return report_control(player_command(command, value, path));
 }
 
 static void scan_close(void)
@@ -567,16 +579,16 @@ static bool can_seek(void)
     return player.mode == ASTER_PLAYER_LOCAL && player.duration_ms != 0;
 }
 
-static bool camera_running(void)
+static bool local_playing(void)
 {
     return player.mode == ASTER_PLAYER_LOCAL && player.state == ASTER_PLAYER_PLAYING &&
            seeking == SEEK_IDLE;
 }
 
-static uint32_t camera_position(uint32_t now, uint32_t rendering_ms)
+static uint32_t lyric_position(uint32_t now, uint32_t rendering_ms)
 {
     uint32_t at = position();
-    if (camera_running() && at < player.duration_ms) {
+    if (local_playing() && at < player.duration_ms) {
         uint32_t elapsed = now - player_sample_at;
         uint32_t advance = (elapsed < 200 ? elapsed : 200) + rendering_ms;
         uint32_t left_ms = player.duration_ms - at;
@@ -585,14 +597,14 @@ static uint32_t camera_position(uint32_t now, uint32_t rendering_ms)
     return at;
 }
 
-static int camera_cue(uint32_t now)
+static int timed_cue(uint32_t now, uint32_t draw_ms)
 {
-    uint32_t at = camera_position(now, camera_cut_ms);
+    uint32_t at = lyric_position(now, draw_ms);
     int next = lrc_active(&lyrics, at);
     /* A cheaper cut can reduce the estimate while the first frame is already
      * visible. Keep that cue until the playhead catches up, except on seeks. */
-    if (camera_running() && next < lyric_line && lyric_line >= 0 &&
-        (int64_t)camera_position(now, CAMERA_MAX_LEAD_MS) + lyrics.offset_ms >=
+    if (local_playing() && next < lyric_line && lyric_line >= 0 &&
+        (int64_t)lyric_position(now, LYRIC_MAX_LEAD_MS) + lyrics.offset_ms >=
             lyrics.cue[lyric_line].time_ms)
         return lyric_line;
     return next;
@@ -604,8 +616,10 @@ static void lyrics_tick(uint32_t now)
     int next;
     if (plain_lyrics)
         next = (int)plain_cue;
-    else if (page == PAPER && motion_effect == CAMERA_PUSH)
-        next = camera_cue(now);
+    else if (page == LYRICS)
+        next = timed_cue(now, lyric_page_draw_ms);
+    else if (page == PAPER)
+        next = timed_cue(now, motion_effect == CAMERA_PUSH ? camera_cut_ms : 0);
     else
         next = lrc_active(&lyrics, position());
     if (lyric_line != next) {
@@ -1156,14 +1170,9 @@ static void paper_tick(uint32_t now)
         paper_line = next;
         dirty = true;
     }
-    uint32_t position_ms = position();
-    if (motion_effect == CAMERA_PUSH) {
-        position_ms = camera_position(aster_time_now_ms(), camera_draw_ms);
-    } else if (player.state == ASTER_PLAYER_PLAYING && seeking == SEEK_IDLE) {
-        uint32_t since_poll = now - last_poll;
-        if (since_poll <= 50)
-            position_ms += since_poll;
-    }
+    uint32_t position_ms = motion_effect == CAMERA_PUSH
+                               ? lyric_position(aster_time_now_ms(), camera_draw_ms)
+                               : lyric_position(now, 0);
     if (paper_highlight(&lyrics, next, bluetooth_input() || plain_lyrics ? UINT32_MAX : position_ms) ||
         now - paper_began <= 650)
         dirty = true;
@@ -1175,7 +1184,7 @@ static uint32_t camera_age(uint32_t now)
         return now - paper_began;
     /* A late frame or a seek should show the camera where the lyric already
      * is in the song, including the file's own LRC offset. */
-    int64_t age = (int64_t)camera_position(now, camera_draw_ms) + lyrics.offset_ms -
+    int64_t age = (int64_t)lyric_position(now, camera_draw_ms) + lyrics.offset_ms -
                   lyrics.cue[paper_line].time_ms;
     return age <= 0 ? 0 : age >= CAMERA_MOVE_MS ? CAMERA_MOVE_MS : (uint32_t)age;
 }
@@ -1201,13 +1210,13 @@ static int draw_paper(uint32_t now)
         uint32_t cost = aster_time_now_ms() - now;
         if (camera_new_frame) {
             uint32_t cut = cost + camera_prepare_ms;
-            if (cut > CAMERA_MAX_LEAD_MS)
-                cut = CAMERA_MAX_LEAD_MS;
+            if (cut > LYRIC_MAX_LEAD_MS)
+                cut = LYRIC_MAX_LEAD_MS;
             camera_cut_ms = (3 * camera_cut_ms + cut) / 4;
             camera_new_frame = false;
         }
-        if (cost > CAMERA_MAX_LEAD_MS)
-            cost = CAMERA_MAX_LEAD_MS;
+        if (cost > LYRIC_MAX_LEAD_MS)
+            cost = LYRIC_MAX_LEAD_MS;
         camera_draw_ms = (camera_draw_ms + cost) / 2;
     }
     return result;
@@ -1217,9 +1226,11 @@ static int current_index(void)
 {
     if (bluetooth_input())
         return -1;
-    const char *base = basename_of(player.path[0] ? player.path : current_file);
+    const char *path = sandbox_track(player.path[0] ? player.path : current_file);
+    if (strncmp(path, "/music/", 7))
+        return -1;
     for (int i = 0; i < track_count; i++)
-        if (!strcmp(base, tracks[i]))
+        if (!strcmp(path + 7, tracks[i]))
             return i;
     return -1;
 }
@@ -1300,8 +1311,16 @@ static void draw(uint32_t now)
         text(44, 283, 372, 18, ink, message, CENTER);
     }
     int result = aster_ge_present(&gfx);
-    if (result < 0)
+    if (result < 0) {
         aster_errfmt("HiFi render %d", result);
+    } else if (page == LYRICS && lyrics.count && !plain_lyrics && local_playing()) {
+        /* Estimate the time to lay out and present the next highlighted line.
+         * Each frame is anchored to the media snapshot, even late in a song. */
+        uint32_t cost = aster_time_now_ms() - now;
+        if (cost > LYRIC_MAX_LEAD_MS)
+            cost = LYRIC_MAX_LEAD_MS;
+        lyric_page_draw_ms = (lyric_page_draw_ms + cost) / 2;
+    }
 }
 
 static int hit(int x, int y)
@@ -1353,6 +1372,8 @@ static bool page_swipe_area(int y)
 
 static uint32_t output(void)
 {
+    if (player.capabilities & ASTER_PLAYER_CAP_SYSTEM_OUTPUT)
+        return ASTER_PLAYER_OUTPUT_SYSTEM;
     aster_player_bt_list_t list = {.size = sizeof(list), .version = 1};
     if (!aster_player_bt_list(&list, sizeof(list)) && list.state == ASTER_PLAYER_BT_CONNECTED &&
         list.output_rate)
@@ -1366,6 +1387,54 @@ static bool media_in_use(void)
            player.state == ASTER_PLAYER_OPENING || player.state == ASTER_PLAYER_STOPPING;
 }
 
+/* ENDED is sticky until the next command. Only consume it for the local
+ * library track we actually saw running, or successfully started ourselves. */
+static int automatic_next(void)
+{
+    const char *path = sandbox_track(player.path);
+    if (player.mode != ASTER_PLAYER_LOCAL || queued_file[0] || strncmp(path, "/music/", 7)) {
+        playing_track[0] = 0;
+        return -1;
+    }
+    if (player.state != ASTER_PLAYER_ENDED) {
+        if (player.state == ASTER_PLAYER_OPENING || player.state == ASTER_PLAYER_PLAYING ||
+            player.state == ASTER_PLAYER_PAUSED) {
+            if (strcmp(playing_track, path))
+                aster_snprintf(playing_track, sizeof(playing_track), "%s", path);
+        } else {
+            playing_track[0] = 0;
+        }
+        return -1;
+    }
+    if (!library_scanned || seeking != SEEK_IDLE || !playing_track[0] || strcmp(playing_track, path))
+        return -1;
+    playing_track[0] = 0;
+    int index = current_index();
+    return index >= 0 && track_count > 1 && scan_error >= 0 ? (index + 1) % track_count : -1;
+}
+
+static void start_queued(uint32_t now)
+{
+    int result = player_command(ASTER_PLAYER_PLAY_FILE, output(), queued_file);
+    /* The old audio worker may briefly be releasing the output after EOF. */
+    if (result == ASTER_EBUSY) {
+        if (!start_busy) {
+            start_retry_until = now + 1500;
+            start_busy = true;
+        }
+        if ((int32_t)(now - start_retry_until) < 0)
+            return;
+    }
+    if (result >= 0) {
+        aster_snprintf(current_file, sizeof(current_file), "%s", queued_file);
+        aster_snprintf(playing_track, sizeof(playing_track), "%s", queued_file);
+    } else {
+        report_control(result);
+    }
+    queued_file[0] = 0;
+    start_busy = false;
+}
+
 static void queue_track(const char *path)
 {
     if (bluetooth_input()) {
@@ -1373,14 +1442,12 @@ static void queue_track(const char *path)
         return;
     }
     seeking = SEEK_IDLE;
-    if (path != current_file)
-        aster_snprintf(current_file, sizeof(current_file), "%s", path);
-    if (media_in_use()) {
-        aster_snprintf(queued_file, sizeof(queued_file), "%s", path);
-        if (player.state != ASTER_PLAYER_STOPPING && control(ASTER_PLAYER_STOP, 0, NULL) < 0)
-            queued_file[0] = 0;
-    } else
-        control(ASTER_PLAYER_PLAY_FILE, output(), path);
+    playing_track[0] = 0;
+    start_busy = false;
+    aster_snprintf(queued_file, sizeof(queued_file), "%s", path);
+    if (media_in_use() && player.state != ASTER_PLAYER_STOPPING &&
+        control(ASTER_PLAYER_STOP, 0, NULL) < 0)
+        queued_file[0] = 0;
     set_page(PLAYBACK);
     dirty = true;
 }
@@ -1550,6 +1617,7 @@ static void poll(uint32_t now)
             dirty = true;
         if (player.mode != next.mode) {
             queued_file[0] = 0;
+            start_busy = false;
             seeking = SEEK_IDLE;
             finger.down = false;
             finger.control = NONE;
@@ -1565,16 +1633,17 @@ static void poll(uint32_t now)
                 dirty = true;
             }
         }
+        int index = automatic_next();
+        if (index >= 0)
+            aster_snprintf(queued_file, sizeof(queued_file), "/music/%s", tracks[index]);
+        if (queued_file[0] && player.mode == ASTER_PLAYER_LOCAL && !media_in_use())
+            start_queued(now);
     }
     sync_media();
     int next_volume = aster_audio_get_volume();
     if (next_volume >= 0 && next_volume != volume) {
         volume = clamp(next_volume, 0, 100);
         dirty = true;
-    }
-    if (queued_file[0] && !bluetooth_input() && !media_in_use()) {
-        control(ASTER_PLAYER_PLAY_FILE, output(), queued_file);
-        queued_file[0] = 0;
     }
 }
 
@@ -1608,6 +1677,7 @@ ASTER_APP_EXPORT int aster_app_init(void)
         return result;
     aster_ge_init(&gfx, surface, width, height, commands, 160, arena, sizeof(arena));
     scan_start();
+    automatic_next();
     sync_media();
     imu_retry_at = aster_time_now_ms();
     aster_app_set_framerate(30);
