@@ -2,7 +2,7 @@
 
 第一版包含本地 Python HTTP 服务、设备商城 APP、设备能力查询和受权限控制的延迟安装。
 服务器运行在 Windows、Linux、macOS 的 Python 3.11+，在 APPS 根目录启动。
-本地使用 HTTP；公网阶段使用 HTTPS 域名与反向代理，不把开发服务器直接当作公网生产服务。
+本地使用 HTTP；公网设备读取 OBS 的 HTTPS 静态目录和内容寻址文件。GitHub Releases 提供独立镜像。
 
 应用源工程继续按现有方式放在仓库根目录，每个工程自行拥有源码、原始素材、转换工具。
 `build/`、`dist/`、运行时数据和资源转换产物不提交。`StoreServer/` 保存服务端代码；

@@ -2,50 +2,29 @@
 
 Aster 应用项目集合：一个应用对应一个独立文件夹，项目代码、素材原件、工具与文档放在各自项目内。
 
-## 当前项目
+## 应用与支持设备
 
-- [Xiangqi](Xiangqi/README.md)：楚河·中国象棋，P4 方屏和 lckfb 竖屏，三档 AI、双人对弈、悔棋和自动续局。
+商城按设备上报的板型、AOT 架构、ABI、能力和屏幕筛选版本。鱼鹰光电 P4C5 与 FAKE POD NANO PRO 同为 RISC-V，商城仍使用各自的板型 ID。
 
-- [PAL](PAL/README.md)：仙剑奇侠传完整引擎移植，ABI 4.3；P4 480×480 与 lckfb 320×240 的独立 AOT 包、简体文字、触屏操作和商城资源。
+- [Aster 音乐](HiFiPlayer/README.md) 面向 FAKE POD NANO PRO 的 460×460 方屏。支持 MP3、WAV、FLAC、本地与手机蓝牙播放，以及三种全屏动态歌词。需要固件 ABI 4.5 和 `media-player` 服务。
+- [楚河·中国象棋](Xiangqi/README.md)、[黄金矿工](GoldMiner/README.md) 和 [仙剑奇侠传](PAL/README.md) 提供鱼鹰 P4C5 和立创 ESP32-S3 实战派两个架构的商城包。
+- [OutRun](OutRun/README.md) 和 [Pixel Wheels](PixelWheels/README.md) 同时支持这两块板。OutRun 在立创板可用倾斜转向，Pixel Wheels 使用屏幕按键。
+- [OpenOMF](OpenOMF/README.md) 和 [OpenTyrian](OpenTyrian/README.md) 的实机商城版本面向鱼鹰 P4C5，分别针对方屏设计格斗和射击操作区。
+- [TouchTest](TouchTest/README.md) 可在以上三款开发板查看设备上报的触点与轨迹。
 
-- [StoreServer](StoreServer/README.md)：Python 本地应用分发服务器，支持程序与独立资源、硬件兼容过滤、摘要校验与分段下载。
-- [AppStore](AppStore/README.md)：设备端商城，ABI 4.3，目录、详情、下载、安装和打开应用。
-- [StoreDemo](StoreDemo/README.md)：商城安装验证，包含独立的 1 MiB 测试资源。
+## 构建、安装与分发
 
-- [OutRun](OutRun/README.md)：OutRun 重制版移植，微雪 480×320 横屏、虚拟按键、地图选择、连续引擎音，ABI 4.1 / Xtensa AOT。
-- [TouchTest](TouchTest/README.md)：多指触控测试，显示触点编号、彩色轨迹、坐标、双指距离与事件统计，ABI 4.1 / Xtensa AOT。
+每个应用目录有独立的 `app.toml`；`store.toml` 记录上架变体、资源目录及适用设备。应用需要的素材转换工具和第三方资源在各工程 README 中说明。已安装 SDK 的开发者可从本仓库根目录执行：
 
-- [PixelWheels](PixelWheels/README.md)：Pixel Wheels 俯视赛车移植版 0.1.6，原版 9 赛道与 15 车型，480×320 横屏、连续引擎与比赛音效，ABI 4.1 / Xtensa AOT，支持模拟器与微雪实机。
-
-- [OpenOMF](OpenOMF/README.md)：OpenOMF 0.2.14 原引擎移植，支持模拟器和微雪实机，原版战斗/AI/菜单与锦标赛存档；需要 ABI 4.2，实机约3.8–6.3FPS，仍有平台能力差异。
-
-- [GoldMiner](GoldMiner/README.md)：经典黄金矿工原生 C 移植，原关卡、商店与音效；0.2.0 采用全触屏操作，只留透明 MENU，提供 P4 480×480 和立创 S3 320×240 的独立 AOT/素材变体。
-
-- [OpenTyrian](OpenTyrian/README.md)：原版 C 引擎纵向卷轴射击，四章资源、原商店与战斗逻辑，480×320 横屏透明按键，ABI 4.2；目前为模拟器移植，实机待验证。
-
-## 目录约定
-
-
-```text
-aster/
-  aster-sdk/      共用 SDK（独立安装，不提交到本仓库）
-  APPS/          本仓库
-    OutRun/
-    TouchTest/
-    <新项目>/
+```sh
+aster build HiFiPlayer --target riscv --aot
+aster verify HiFiPlayer/dist/riscv/aster.hifi.ast
+aster deploy HiFiPlayer/dist/riscv/aster.hifi.ast --target riscv --port PORT --run
 ```
 
-新项目直接放在 APPS 下，与现有项目平级；不把项目依赖的原始素材拆到 APPS 的另一个项目文件夹。
+将 `PORT` 换成实际串口。播放器的歌词艺术字和试听资源包含在包内。带独立资源树的游戏需要将对应版本的程序与资源一起安装。游戏资源准备、构建和上架命令见 [商城应用构建](docs/market-apps.zh-CN.md)。
 
-## 构建
-
-商城发布约定见 [应用与资源规划](docs/app-store-plan.zh-CN.md)。新工程可在 `app.toml` 声明所需能力和适用板型，在 `store.toml` 记录各版本实测的板型；编译包与生成资源分别放在 `dist/<target>`、`dist/resources`。服务端由 APPS 根目录执行 `python -m StoreServer serve`，无须启动固件或 SDK。
-
-现有六个应用的 P4 构建、资源迁移与发布步骤见 [商城应用构建](docs/market-apps.zh-CN.md)。
-
-安装兼容的 Aster SDK 后，进入各项目执行 `./tools/build.ps1`；模拟运行执行 `./tools/run-sim.ps1`，具体要求见项目 README。OutRun 的部分脚本仍记录当前开发机 SDK 路径，更换开发机时需同步配置。
-
-编译输出 build/dist、运行记录 artifacts、Python 缓存和生成的 sdcard 资源不入库。OutRun 的 SD 资源由项目内 `vendor/upstream` 和资源转换工具重新生成；新克隆后先安装 `OutRun/tools/requirements.txt` 中的 Python 依赖并运行构建。真机部署还需按 OutRun 文档打包并上传外部 SD 资源，仅安装 AST 包不够。
+[AppStore](AppStore/README.md) 是设备端商城；[StoreServer](StoreServer/README.md) 提供本地目录和下载服务。从仓库根运行 `python -m StoreServer serve` 可启动本地服务。[StoreDemo](StoreDemo/README.md) 是带独立资源的安装测试工程。公网目录由 [发布配置](https://github.com/hello-myj/aster-releases/blob/main/publication.json) 选择应用。协议、断点续传及版本兼容规则见 [应用与资源分发](docs/app-store-plan.zh-CN.md)。
 
 ## 第三方来源
 

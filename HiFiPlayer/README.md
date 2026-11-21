@@ -26,7 +26,7 @@ Hi-Fi 播放器 0.4.27，按 FAKE POD NANO PRO 的 460×460 方屏设计，最�
 
 基线 JPEG 封面使用 ChaN 的 TJpgDec R0.03，播放器分帧读取和解码，内嵌 JPEG 直接从歌曲文件读取。源码及许可随工程保留。[TJpgDec 来源与许可](https://github.com/hello-myj/aster-firmware/blob/6a54e3e2294ac9a91ec4aecc3445fbf4cd405c81/modules/imgdec/vendor/tjpgd.c)
 
-进度条支持整条触摸区域按下与拖动，拖动时预览目标时间，松手提交跳转；音乐自然结束后仍可拖到目标位置继续播放。
+本地播放时，进度条支持整条触摸区域按下与拖动，拖动时预览目标时间，松手提交跳转；音乐自然结束后仍可拖到目标位置继续播放。手机蓝牙播放时，设备显示手机回报的时间，在手机播放器内定位。
 
 ## 动态歌词的设计参考与字体
 

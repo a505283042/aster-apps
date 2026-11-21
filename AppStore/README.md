@@ -2,9 +2,9 @@
 
 原生 C 应用，使用 Aster SDK 的绘图、触摸、HTTP(S)、文件系统和应用管理接口。需要 ABI 4.3 固件，权限为 `net`、`fs`、`kv`、`appmgr`。支持目录、详情、权限与体积提示、下载进度、取消、失败重试、打开已安装应用和服务地址设置。
 
-商城 0.3.3 在应用详情中显示当前版本在本机型上的实测状态。旧目录没有实测记录时显示“暂无本机型实测记录”。
+商城 0.3.3 在应用详情中显示当前版本在本机型上的实测状态。旧目录没有实测记录时显示“暂无本机型实测记录”。鱼鹰光电 P4C5、立创实战派和 FAKE POD NANO PRO 首次开机均从 OBS 下载商城 0.3.3。已完成首次开机的设备保留其已安装版本；手动更新可用下文的 SDK 串口部署命令。
 
-商城 0.3.2 支持 `media-player` 能力。FAKE POD NANO PRO 使用 ABI 4.5 且固件提供媒体播放服务时，可以在静态商城看到并下载 Aster 音乐。该板首次开机获取新版商城；已装 0.3.1 的设备可通过 SDK 串口安装 0.3.2。
+商城 0.3.2 支持 `media-player` 能力。FAKE POD NANO PRO 使用 ABI 4.5 且固件提供媒体播放服务时，可以在静态商城看到并下载 Aster 音乐。
 
 商城 0.3.1：打开或切换下载源时，地址框从 http/https 前缀显示，光标位于开头；左右箭头短按移动一字符，按住 350 ms 后连续移动，1 秒后加速，松手、移出按钮或暂停时停止。
 
@@ -45,7 +45,7 @@ python AppStore/tools/build.py --target riscv --server-url http://192.168.110.15
 python ../aster-sdk/tools/deploy.py AppStore/dist/riscv/aster.store.ast --target riscv --port COM11 --run
 ```
 
-P4 用 `riscv`，S3 用 `xtensa`，分别构建和部署。0.1.1 同时适配 480×480 和 lckfb 的 320×240 横屏，后者使用紧凑列表、详情、进度及地址键盘。构建脚本给 Xtensa 配置 384 KiB 客户堆，P4 使用 768 KiB。服务端的板白名单仍须逐板确认，不能把 P4 应用直接提供给 S3。lckfb 的运行时板 ID 是 `aster.esp32s3.lckfb`。
+鱼鹰 P4C5 和 FAKE POD NANO PRO 用 `riscv`，立创实战派用 `xtensa`。公共源使用 `--server-url https://aster-releases.obs.cn-south-1.myhuaweicloud.com/aster-source.json`，本地调试可换为电脑的局域网地址。0.1.1 同时适配 480×480 和 lckfb 的 320×240 横屏，后者使用紧凑列表、详情、进度及地址键盘。构建脚本给 Xtensa 配置 384 KiB 客户堆，P4 使用 768 KiB。服务端的板白名单仍须逐板确认，不能把 P4 应用直接提供给 S3。lckfb 的运行时板 ID 是 `aster.esp32s3.lckfb`。
 
 ```sh
 python AppStore/tools/build.py --target xtensa --server-url http://192.168.110.154:9080

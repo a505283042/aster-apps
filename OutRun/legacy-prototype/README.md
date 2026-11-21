@@ -2,7 +2,6 @@
 
 这是基于 ZgzInfinity/OutRun 重制版的 480×320 横屏可玩首版。首版移植了 Map1 路段曲率数据和上游车辆/棕榈素材，并以 Aster ABI 4 图形与触控 API 重写单车道伪 3D 驾驶循环。
 
-![Aster ABI 4 模拟器最终画面](artifacts/drive-final.png)
 
 ## 构建与运行
 
