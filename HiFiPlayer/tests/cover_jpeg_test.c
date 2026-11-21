@@ -32,20 +32,21 @@ static void marker(unsigned n)
 
 static void table(unsigned kind)
 {
+    const bool ac = (kind & 0x10) != 0;
     marker(0xc4);
-    word(kind ? 20 : 21);
+    word(ac ? 20 : 21);
     byte(kind);
     for (int i = 0; i < 16; i++)
-        byte(i == 0 || (!kind && i == 1));
+        byte(i == 0 || (!ac && i == 1));
     byte(0);
-    if (!kind)
+    if (!ac)
         byte(6);
 }
 
 /* Baseline grayscale JPEG in a FLAC-like byte range. A restart marker at
  * every MCU exercises the entropy state across slices. Alternate DC values
  * spatially so a missing row, stride error or incorrect restart is visible. */
-static void fixture(unsigned w, unsigned h)
+static void fixture(unsigned w, unsigned h, bool color)
 {
     tail = PREFIX;
     marker(0xd8);
@@ -61,25 +62,34 @@ static void fixture(unsigned w, unsigned h)
         byte(8);
 
     marker(0xc0);
-    word(11);
+    unsigned components = color ? 3 : 1;
+    word(8 + components * 3);
     byte(8);
     word(h);
     word(w);
-    byte(1);
-    byte(1);
-    byte(0x11);
-    byte(0);
+    byte(components);
+    for (unsigned c = 0; c < components; c++) {
+        byte(c + 1);
+        byte(0x11);
+        byte(0);
+    }
     table(0);
     table(0x10);
+    if (color) {
+        table(1);
+        table(0x11);
+    }
 
     marker(0xdd);
     word(4);
     word(1);
     marker(0xda);
-    word(8);
-    byte(1);
-    byte(1);
-    byte(0);
+    word(6 + components * 2);
+    byte(components);
+    for (unsigned c = 0; c < components; c++) {
+        byte(c + 1);
+        byte(c ? 0x11 : 0);
+    }
     byte(0);
     byte(63);
     byte(0);
@@ -88,7 +98,14 @@ static void fixture(unsigned w, unsigned h)
         for (unsigned x = 0; x < w; x += 8) {
             if (seq)
                 marker(0xd0 + ((seq - 1) & 7));
-            if (((x / 8) ^ (y / 8)) & 1) {
+            if (color) {
+                /* Constant Y=128. Alternate (Cb,Cr)=(96,160) and (160,96). */
+                static const uint8_t warm[] = {0x27, 0xd4, 0x0f};
+                static const uint8_t cool[] = {0x28, 0x13, 0xef};
+                const uint8_t *coded = (x / 8) % 2 ? cool : warm;
+                for (unsigned k = 0; k < sizeof(warm); k++)
+                    byte(coded[k]);
+            } else if (((x / 8) ^ (y / 8)) & 1) {
                 byte(0xa0);
                 byte(0x7f);
             } else {
@@ -125,7 +142,7 @@ uint32_t aster_time_now_ms(void)
 
 static void check(unsigned w, unsigned h)
 {
-    fixture(w, h);
+    fixture(w, h, false);
     memset(canvas, 0xff, sizeof(canvas));
     assert(cover_jpeg_begin(1, PREFIX, tail - PREFIX, COVER_EDGE, canvas + 1, work));
     unsigned ow = 0, oh = 0, slices = 0;
@@ -157,15 +174,25 @@ static void check(unsigned w, unsigned h)
 
 int main(void)
 {
+    fixture(16, 8, true);
+    for (unsigned cap = 2; cap <= 16; cap *= 2) {
+        unsigned w = 0, h = 0;
+        assert(cover_jpeg_begin(1, PREFIX, tail - PREFIX, cap, canvas, work));
+        assert(cover_jpeg_step(&w, &h) == 1 && w == cap && h == cap / 2);
+        /* RGB565: warm flesh tone on the left, blue on the right. */
+        for (unsigned y = 0; y < h; y++)
+            for (unsigned x = 0; x < w; x++)
+                assert(canvas[y * w + x] == (x < w / 2 ? 0xaba9 : 0x5457));
+    }
     check(1243, 601);
     check(81, 133);
     check(241, 1800);
-    fixture(1243, 601);
+    fixture(1243, 601, false);
     assert(cover_jpeg_begin(1, PREFIX, tail - PREFIX, COVER_EDGE, canvas, work));
     unsigned w, h;
     assert(cover_jpeg_step(&w, &h) == 0);
     check(17, 9); /* Switching tracks drops a partially decoded image. */
-    fixture(193, 141);
+    fixture(193, 141, false);
     tail -= 220;
     assert(cover_jpeg_begin(1, PREFIX, tail - PREFIX, COVER_EDGE, canvas, work));
     int result;

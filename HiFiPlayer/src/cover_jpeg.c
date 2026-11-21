@@ -118,8 +118,11 @@ static int paint_mcu(JDEC *jd, void *bitmap, JRECT *rect)
     unsigned y0 = first_sample(sample_y, out_h, rect->top);
     for (unsigned y = y0; y < out_h && sample_y[y] <= rect->bottom; y++) {
         const uint16_t *row = block + (sample_y[y] - rect->top) * pitch;
-        for (unsigned x = x0; x < out_w && sample_x[x] <= rect->right; x++)
-            output[y * out_w + x] = row[sample_x[x] - rect->left];
+        for (unsigned x = x0; x < out_w && sample_x[x] <= rect->right; x++) {
+            /* This TJpgDec build packs BGR565. The cover canvas uses RGB565. */
+            uint16_t bgr = row[sample_x[x] - rect->left];
+            output[y * out_w + x] = (uint16_t)((bgr << 11) | (bgr & 0x07e0) | (bgr >> 11));
+        }
     }
     return 1;
 }
