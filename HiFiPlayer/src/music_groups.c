@@ -48,7 +48,9 @@ static bool ready, blocked, gc_save_pending;
 /* V1 cached group snapshot. All on-disk structures are versioned and
  * validated before publication. Never overwrite a previous generation's
  * completed slot while building a replacement. */
-enum { GC_MAGIC = 0x31474348u, GC_VERSION = 1, GC_STEP_BYTES = 4096 };
+/* Rebuild the old V1 snapshot once: it lost extra Vorbis ARTIST / ID3v2.4
+ * performers and limited names to 63 UTF-8 bytes. HIF2 queue stays intact. */
+enum { GC_MAGIC = 0x31474348u, GC_VERSION = 2, GC_STEP_BYTES = 4096 };
 enum gc_state { GC_PROBE, GC_READ, GC_WRITE, GC_VERIFY, GC_IDLE };
 typedef struct {
     uint32_t magic, version, generation, track_count;
