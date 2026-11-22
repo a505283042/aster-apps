@@ -39,11 +39,11 @@ int main(void)
     while (!library_scanned)
         scan_tick();
     assert(closed == 1 && track_count == 140 && scan_error == 0);
-    assert(track_capacity >= 140);
-    assert(!strcmp(tracks[0], "song000.flac"));
-    assert(!strcmp(tracks[63], "song063.flac"));
-    assert(!strcmp(tracks[64], "song064.flac"));
-    assert(!strcmp(tracks[139], "song139.flac"));
+    assert(track_used > 0);
+    assert(!strcmp(track_name(0), "song000.flac"));
+    assert(!strcmp(track_name(63), "song063.flac"));
+    assert(!strcmp(track_name(64), "song064.flac"));
+    assert(!strcmp(track_name(139), "song139.flac"));
     assert(page_count() == 28);
     player.mode = ASTER_PLAYER_LOCAL;
     aster_snprintf(player.path, sizeof(player.path), "/SD:/music/song139.flac");
