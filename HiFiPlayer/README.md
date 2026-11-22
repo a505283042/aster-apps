@@ -58,6 +58,6 @@ Hi-Fi 播放器 0.5.0-alpha.1，按 FAKE POD NANO PRO 的 460×460 方屏设计�
 
 索引位于 APP 沙盒 `/data/hifi_catalog_a.bin` 和 `/data/hifi_catalog_b.bin`，即 TF 卡的 `aster/apps/aster.hifi/data/`；两个交替槽位有版本、generation、条目 CRC32、Header CRC32 和顺序无关的 path+size 变化摘要。新索引先写空闲槽、分帧校验刚写出的负载 CRC 后才切换；断电、扫描失败或文件写入失败时仍使用旧快照。已有索引会先用于展示，后台逐步完整扫描校验新增/删除路径，无变化时不提升 generation。
 
-**限制与下一阶段：** 这是 Aster 格式，不直接覆盖原 S31 `/System/library` 的 V2 二进制；Aster 4.5 的 `aster_fs_stat` 没有 mtime，因此同路径且大小不变的文件原地覆盖可能不会触发快照变化；扫描顺序暂沿文件系统枚举顺序，排序/歌手/专辑/年代分组、完整播放上下文与随机历史、封面预热将在后续阶段移植。深层目录超过 8 层时扫描拒绝提交不完整快照。退出 APP 后系统播放器后台仍不提供完整的连续队列，需后续配套固件 API。没有使用 ESP-IDF 或 Zephyr 私有函数。
+**限制与下一阶段：** 这是 Aster 格式，不直接覆盖原 S31 `/System/library` 的 V2 二进制；Aster 4.5 的 `aster_fs_stat` 没有 mtime，因此同路径且大小不变的文件原地覆盖可能不会触发快照变化；扫描顺序暂沿文件系统枚举顺序，排序/歌手/专辑/年代分组、完整播放上下文与随机历史、封面预热将在后续阶段移植。Aster 固件当前最多同时打开 4 个目录句柄，路径 API 限制为 160 字节，故本阶段最多扫描 4 层目录、单条相对路径不超过 151 个 UTF-8 字节；超深目录扫描会拒绝提交不完整快照，过长路径会跳过。退出 APP 后系统播放器后台仍不提供完整的连续队列，需后续配套固件 API。没有使用 ESP-IDF 或 Zephyr 私有函数。
 
 验证：`aster build HiFiPlayer --target riscv --aot`、`aster verify HiFiPlayer/dist/riscv/aster.hifi.ast`，再安装到 SD。观察串口 `HiFi catalog scan start cached=...` / `HiFi catalog progress=...` / `HiFi catalog committed tracks=...`。首次索引构建分帧完成，大容量音乐卡会比旧 64 首扫描更久；未通过实机验证前不要合并主分支。
