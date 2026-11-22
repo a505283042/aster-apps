@@ -20,6 +20,8 @@ Hi-Fi 播放器 0.4.28，按 FAKE POD NANO PRO 的 460×460 方屏设计，最�
 - 返回桌面保留后台音乐；切换模式会停止前一种源。当前不提供发送模式的耳机按键遥控或 AAC。
 - 曲库为目录当前层，不递归子目录。安装包声明支持 `fakepod-s31` 并要求 `media-player`。支持板型检查的固件会在启动时核对这两项。
 
+**技术实现详解**：[HiFiPlayer 0.4.28 技术实现：独立 AOT、动态歌词、字体、封面和内存](docs/implementation.zh-CN.md)。涵盖 384 KiB 曲库索引、字形 Atlas、30 FPS 事件调度、局部刷新、TF 卡 I/O，以及与固件后台播放的分工。
+
 构建：在配置好 SDK 的终端运行 `aster build HiFiPlayer --target riscv --aot`，串口安装使用 `aster deploy PACKAGE --target riscv --port COM14 --run`，实际端口以设备识别结果为准。
 
 `audio/demo.flac` 是 48 kHz/24 位双声道原创试听旋律，`art/moonlight.bmp` 是原创默认封面，两者均采用 MIT 授权。
