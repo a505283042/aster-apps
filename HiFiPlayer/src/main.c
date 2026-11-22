@@ -1455,7 +1455,7 @@ static bool page_swipe_area(int y)
     if (page == PAPER)
         return y >= 24 && y < DESIGN - 24;
     if (page == PLAYBACK)
-        return y >= 24 && y < 320;
+        return y >= 24 && y < (controls_visible ? 320 : DESIGN - 24);
     return y >= HEADER_END && y < (page == LYRICS ? LYRIC_SEEK_TOP : LIBRARY_PAGER);
 }
 
