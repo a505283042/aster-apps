@@ -57,6 +57,29 @@ class HiFiControlsV1(unittest.TestCase):
         self.assertIn("triangle(", mode)
         self.assertNotIn('text(68, 367', mode)
 
+    def test_queue_number_width_and_transport_spacing(self):
+        info = between("static void playback_audio_info(", "/* Two fully distinct album states")
+        self.assertIn('"%u / %u · %s · %s"', info)
+        self.assertIn('"%u / %u · %s"', info)
+        self.assertNotIn("%04u", info)
+        playback = between("static void playback(void)", "static int next_lyric_group(")
+        hit = between("static int hit(int x, int y)", "static bool page_swipe_area(")
+        self.assertIn("circle(116, 194, 37", playback)
+        self.assertIn("circle(230, 194, 47", playback)
+        self.assertIn("circle(344, 194, 37", playback)
+        self.assertIn("x >= 79 && x < 153", hit)
+        self.assertIn("x >= 307 && x < 381", hit)
+        # Circular surfaces are disjoint and each has its own hit target.
+        self.assertEqual((230 - 47) - (116 + 37), 30)
+        self.assertEqual((344 - 37) - (230 + 47), 30)
+
+    def test_notice_badge_is_contextual(self):
+        statuses = between("static void playback_status_pills(", "static void playback_audio_info(")
+        self.assertIn('message[0] ? "提示"', statuses)
+        self.assertIn('ASTER_PLAYER_PLAYING ? "播放中"', statuses)
+        self.assertIn('ASTER_PLAYER_PAUSED ? "已暂停"', statuses)
+        self.assertIn('ASTER_PLAYER_ERROR ? "播放错误"', statuses)
+
     def test_info_and_source_pills(self):
         statuses = between("static void playback_status_pills(", "static void playback_audio_info(")
         for label in ("有线", "蓝牙接收", "蓝牙发射", "提示"):
