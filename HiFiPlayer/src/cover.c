@@ -280,7 +280,7 @@ static bool finish_image(uint32_t w, uint32_t h)
     return true;
 }
 
-static bool decode_native(const char *path, unsigned cap)
+static bool decode_native(const char *path, unsigned cap, aster_handle_t surface)
 {
     aster_img_render_args_t args = {.size = sizeof(args),
                                     .version = 1,
@@ -291,10 +291,35 @@ static bool decode_native(const char *path, unsigned cap)
     if (aster_img_render(path, strlen(path), &args, sizeof(args)) < 0 || !args.out_w ||
         !args.out_h || args.out_w > cap || args.out_h > cap)
         return false;
-    return finish_image(args.out_w, args.out_h);
+    if (args.out_w == cap && args.out_h == cap)
+        return finish_image(cap, cap);
+
+    /* The native PNG/BMP decoder fits the source inside cap x cap. Resample
+     * its centre square using the already allocated APP surface as scratch.
+     * No third RGB565 buffer is needed, including for portrait covers. */
+    aster_surface_buffer_t buf = {.size = sizeof(buf), .version = 1};
+    if (aster_surface_acquire(surface, &buf, sizeof(buf)) < 0 || !buf.ptr ||
+        buf.format != ASTER_PIXEL_RGB565 || buf.width < cap || buf.height < cap)
+        return finish_image(args.out_w, args.out_h);
+    uint16_t *scratch = buf.ptr;
+    unsigned pitch = buf.pitch / sizeof(uint16_t);
+    unsigned w = args.out_w, h = args.out_h;
+    unsigned side = w < h ? w : h;
+    unsigned ox = (w - side) / 2, oy = (h - side) / 2;
+    for (unsigned y = 0; y < cap; y++) {
+        const uint16_t *src = pixels + (oy + (uint64_t)y * side / cap) * w;
+        uint16_t *dst = scratch + (size_t)y * pitch;
+        for (unsigned x = 0; x < cap; x++)
+            dst[x] = src[ox + (uint64_t)x * side / cap];
+    }
+    for (unsigned y = 0; y < cap; y++)
+        memcpy(pixels + (size_t)y * cap, scratch + (size_t)y * pitch,
+               cap * sizeof(uint16_t));
+    return finish_image(cap, cap);
 }
 
-static bool open_image(const char *path, unsigned cap, enum cover_phase fallback)
+static bool open_image(const char *path, unsigned cap, enum cover_phase fallback,
+                       aster_handle_t surface)
 {
     phase = fallback;
     unsigned n = strlen(path);
@@ -310,10 +335,10 @@ static bool open_image(const char *path, unsigned cap, enum cover_phase fallback
         return false;
     }
     close_files();
-    return decode_native(path, cap);
+    return decode_native(path, cap, surface);
 }
 
-static bool sidecar(unsigned cap)
+static bool sidecar(unsigned cap, aster_handle_t surface)
 {
     static const char *extensions[] = {".jpg", ".jpeg", ".png", ".bmp"};
     const char *ext = NULL;
@@ -333,7 +358,7 @@ static bool sidecar(unsigned cap)
     memcpy(path, track_path, prefix);
     const char *extension = extensions[extension_index++];
     memcpy(path + prefix, extension, strlen(extension) + 1);
-    return open_image(path, cap, SIDECAR);
+    return open_image(path, cap, SIDECAR, surface);
 }
 
 void cover_select(const char *track)
@@ -363,16 +388,17 @@ void cover_select_remote(const char *path, uint32_t revision)
     phase = EXTERNAL;
 }
 
-bool cover_tick(unsigned cap)
+bool cover_tick(aster_handle_t surface, unsigned cap)
 {
     if (cap > COVER_EDGE)
         cap = COVER_EDGE;
     if (!cap || phase == IDLE)
         return false;
     if (phase == SIDECAR)
-        return sidecar(cap);
+        return sidecar(cap, surface);
     if (phase == EXTERNAL)
-        return open_image(remote_revision ? track_path : "/assets/art/moonlight.bmp", cap, IDLE);
+        return open_image(remote_revision ? track_path : "/assets/art/moonlight.bmp", cap, IDLE,
+                          surface);
     if (phase == EMBEDDED) {
         begin_embedded(cap);
         return false;
@@ -388,7 +414,7 @@ bool cover_tick(unsigned cap)
     }
     if (phase == DECODE_COPY) {
         phase = IDLE;
-        bool ok = decode_native(scratch, cap);
+        bool ok = decode_native(scratch, cap, surface);
         aster_fs_unlink(scratch, sizeof(scratch) - 1);
         return ok;
     }
@@ -432,6 +458,9 @@ uint16_t cover_mix(uint16_t base, uint16_t color, unsigned weight)
     return (r << 11) | (g << 5) | b;
 }
 
+/* The unmodified 460 x 460 RGB565 cover stays in 'pixels'. The existing APP
+ * surface is the only dimmed/display buffer. Repainting restores the complete
+ * background before labels and controls are redrawn, so no ghosts accumulate. */
 bool cover_paint(aster_handle_t surface, unsigned left, unsigned top, unsigned edge, uint16_t base,
                  uint16_t accent)
 {
@@ -441,44 +470,23 @@ bool cover_paint(aster_handle_t surface, unsigned left, unsigned top, unsigned e
     if (aster_surface_acquire(surface, &buf, sizeof(buf)) < 0 || !buf.ptr ||
         buf.format != ASTER_PIXEL_RGB565 || left + edge > buf.width || top + edge > buf.height)
         return false;
-    unsigned pitch = buf.pitch / sizeof(uint16_t);
-    unsigned ambient_h = edge * 225 / 460;
-    unsigned max_dimension = image_w > image_h ? image_w : image_h;
-    unsigned h = image_h * edge * 208 / 460 / max_dimension;
-    unsigned w = image_w * edge * 208 / 460 / max_dimension;
-    if (!w)
-        w = 1;
-    if (!h)
-        h = 1;
-    unsigned ax = left + (edge - w) / 2, ay = top + (ambient_h - h) / 2;
     uint16_t *dest = buf.ptr;
-    uint16_t glow = cover_mix(cover_mix(base, accent, 75), tint, 44);
-    uint16_t *base_row = dest + (top + ambient_h) * pitch;
-    for (unsigned x = 0; x < buf.width; x++)
-        base_row[x] = base;
-    for (unsigned y = 0; y < buf.height; y++) {
-        uint16_t *row = dest + y * pitch;
-        if (y < top || y >= top + ambient_h) {
-            if (row != base_row)
-                memcpy(row, base_row, buf.width * sizeof(*row));
-            continue;
+    unsigned pitch = buf.pitch / sizeof(uint16_t);
+    unsigned side = image_w < image_h ? image_w : image_h;
+    unsigned ox = (image_w - side) / 2, oy = (image_h - side) / 2;
+    uint16_t shade_base = cover_mix(base, accent, 12);
+    for (unsigned y = 0; y < edge; y++) {
+        const uint16_t *src = pixels + (oy + (uint64_t)y * side / edge) * image_w;
+        uint16_t *dst = dest + (top + y) * pitch + left;
+        /* Keep the cover recognisable in the top half; darken progressively
+         * behind the title, timeline and five touch controls below. */
+        unsigned shade = 104 + 44 * y / edge;
+        if (y > edge / 2)
+            shade += 65 * (y - edge / 2) / (edge - edge / 2);
+        for (unsigned x = 0; x < edge; x++) {
+            uint16_t original = src[ox + (uint64_t)x * side / edge];
+            dst[x] = cover_mix(original, shade_base, shade);
         }
-        unsigned depth = top + ambient_h - y;
-        uint16_t edge_tone = cover_mix(base, glow, 1 + depth * 113 / ambient_h);
-        uint16_t center_tone = cover_mix(base, glow, 1 + depth * 179 / ambient_h);
-        for (unsigned x = 0; x < buf.width; x++) {
-            unsigned offset = x < left ? edge : x - left;
-            unsigned distance = offset < edge / 2 ? offset : offset < edge ? edge - offset : 0;
-            row[x] = cover_mix(edge_tone, center_tone, distance * 512 / edge);
-        }
-        if (y < ay || y >= ay + h)
-            continue;
-        const uint16_t *src = pixels + (y - ay) * image_h / h * image_w;
-        if (w == image_w)
-            memcpy(row + ax, src, w * sizeof(*src));
-        else
-            for (unsigned x = 0; x < w; x++)
-                row[ax + x] = src[x * image_w / w];
     }
     return true;
 }
