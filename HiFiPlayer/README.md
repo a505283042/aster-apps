@@ -40,6 +40,14 @@ Hi-Fi 播放器 0.5.0-alpha.1，按 FAKE POD NANO PRO 的 460×460 方屏设计�
 重新生成字库时，构建脚本使用 fontTools 提取字体轮廓；设备端由播放器直接绘制这些轮廓。[字库生成脚本](tools/build_paper_font.py) · [fontTools 项目](https://github.com/fonttools/fonttools)
 
 
+## 0.5.0-alpha.10 · 歌手标签与首次空闲切歌
+
+- **歌手栏**优先显示音乐文件的 MP3 ID3 `TPE1/TP1` 或 FLAC Vorbis `ARTIST`，缺失时回退 `TPE2/ALBUMARTIST`，之后才使用匹配的 LRC `[ar:]`。蓝牙接收仍显示手机 AVRCP 提供的歌手/专辑；“有线 / 蓝牙发射”只在播放页底部输出指示器出现。
+- MP3 ID3v2.4 多值歌手、FLAC 重复 `ARTIST` 支持按原 FakePod_S31 的 ` / ` 方式连接；放宽字段长度至 191 个 UTF-8 字节（实际完整字符长度视 UTF-8 编码而定），保留 ID3v1 兜底。
+- **歌手标签缓存**直接从已有 HIF2 曲目 ID 取歌手：只在无音频播放的初始化/换歌空档读取一次歌曲标签，绝不在进度条每帧刷新时重复读 TF。歌手分组的双槽快照从 V1 升为 V2，因此升级后会在空闲时重新整理歌手/专辑缓存一次；**无需重扫 HIF2 音乐文件目录**。
+- **首次打开 APP 未播放时**，中央上一首/下一首可以根据保存的选中曲目启动相邻歌曲；若 HIF2 哈希还在分批加载，按键触发一次有界批量查找，不会把尚未恢复的选中歌曲误认为第一首。已有播放会继续由固件统一处理切歌及后台自动续播。首次音乐索引尚未完成时不允许启动曲库歌曲。
+- 只需更新 HiFiPlayer APP，不需要升级固件。PC 静态回归：`python -m unittest discover -s HiFiPlayer/tests -p "test_*.py" -v`（其中依赖本机 C 编译器的测试可在 Windows 上跳过）。
+
 ## 自定义无封面图（本次上传的 460×460 JPEG）
 
 将用户提供的 `no_cover_artwork.jpg` 放入 TF 卡 `music/no_cover_artwork.jpg`，APP 即会在歌曲缺少专辑封面时使用它，不必更改歌曲文件名或修改固件。也可放入 `HiFiPlayer/art/no_cover_artwork.jpg` 并在本地 `app.toml` 的 `assets` 列表添加 `"art/no_cover_artwork.jpg"` 以随 APP 打包；若还未复制此文件，切勿将其加入资源列表，否则编译会提示找不到资源。旧的 `moonlight.bmp` 保留兼容。
