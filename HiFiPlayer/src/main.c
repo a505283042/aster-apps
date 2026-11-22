@@ -75,6 +75,7 @@ static uint32_t shuffle_seed = 0x6b7b3d29;
 static enum page page = PLAYBACK;
 static char current_file[256], queued_file[256];
 static uint32_t catalog_generation;
+static bool lookup_was_ready;
 /* The 5-row library and track controls read the persistent catalog by index. */
 static char track_buffer[HIFI_CATALOG_PATH_MAX];
 static char playing_track[sizeof(current_file)];
@@ -427,6 +428,7 @@ static void scan_start(void)
     library_page = 0;
     scan_error = status.error;
     library_scanned = !status.scanning || status.has_saved;
+    lookup_was_ready = hifi_catalog_lookup_ready();
     /* A cached catalog is immediately browsable while SD scanning continues. */
     if (status.has_saved) settle_scan_selection();
 }
@@ -442,8 +444,11 @@ static void scan_tick(void)
     catalog_generation = status.generation;
     scan_error = status.error;
     library_scanned = !status.scanning || status.has_saved;
+    bool lookup_ready = hifi_catalog_lookup_ready();
+    bool lookup_became_ready = lookup_ready && !lookup_was_ready;
+    lookup_was_ready = lookup_ready;
     if (prior != track_count || was_scanned != library_scanned ||
-        old_generation != catalog_generation) {
+        old_generation != catalog_generation || lookup_became_ready) {
         if (library_page >= (track_count + ROWS - 1) / ROWS)
             library_page = track_count ? (track_count - 1) / ROWS : 0;
         dirty = true;
@@ -452,8 +457,8 @@ static void scan_tick(void)
         char first[256];
         if (index_path(0, first, sizeof(first))) select_track(first);
     }
-    if (library_scanned && hifi_catalog_lookup_ready() &&
-        (old_generation != catalog_generation || !was_scanned))
+    if (library_scanned && lookup_ready &&
+        (old_generation != catalog_generation || !was_scanned || lookup_became_ready))
         settle_scan_selection();
 }
 
