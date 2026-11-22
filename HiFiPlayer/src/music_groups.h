@@ -18,6 +18,8 @@ typedef struct {
     bool unknown_year;
 } hifi_group_info_t;
 void hifi_groups_start(void);
+void hifi_groups_close(void);
+void hifi_groups_invalidate_cache(void);
 void hifi_groups_tick(bool playback_active);
 bool hifi_groups_busy(void);
 bool hifi_groups_ready(void);
