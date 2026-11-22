@@ -4,6 +4,7 @@
 #include "cover.h"
 #include "flac_lyrics.h"
 #include "lrc.h"
+#include "music_catalog.h"
 #include "paper.h"
 #include "shake.h"
 
@@ -23,7 +24,7 @@ enum control {
     TRACK_FIRST
 };
 
-enum { DESIGN = 460, ROWS = 5, TRACK_LIMIT = 64, PROGRESS_X = 33, PROGRESS_W = 394 };
+enum { DESIGN = 460, ROWS = 5, PROGRESS_X = 33, PROGRESS_W = 394 };
 
 enum {
     HEADER_END = 59,
@@ -56,7 +57,7 @@ static const uint16_t background = RGB(13, 17, 22), rim = RGB(16, 22, 29), chrom
                       selected = RGB(48, 42, 36), lyric_accent = RGB(255, 157, 78),
                       rail = RGB(58, 68, 81);
 
-static aster_handle_t surface, directory, lyric_file;
+static aster_handle_t surface, lyric_file;
 static aster_ge_t gfx;
 static aster_gfx_cmd_t commands[160];
 static uint8_t arena[4096];
@@ -72,7 +73,10 @@ enum playback_order { ORDER_NORMAL, ORDER_REPEAT, ORDER_SHUFFLE };
 static enum playback_order playback_mode = ORDER_NORMAL;
 static uint32_t shuffle_seed = 0x6b7b3d29;
 static enum page page = PLAYBACK;
-static char tracks[TRACK_LIMIT][248], current_file[256], queued_file[256];
+static char current_file[256], queued_file[256];
+static uint32_t catalog_generation;
+/* The 5-row library and track controls read the persistent catalog by index. */
+static char track_buffer[HIFI_CATALOG_PATH_MAX];
 static char playing_track[sizeof(current_file)];
 static char selected_file[sizeof(current_file)];
 static const char track_kv_key[] = "last_track";
@@ -381,70 +385,75 @@ static void select_track(const char *path)
     dirty = true;
 }
 
+/* Stable relative song paths are held in the S31-style disk catalog.
+ * Do not put a multi-thousand-song path array in WASM linear memory. */
+static const char *track_at(int index)
+{
+    if (index < 0 || index >= track_count ||
+        !hifi_catalog_path_at((uint32_t)index, track_buffer, sizeof(track_buffer)))
+        return "";
+    return track_buffer;
+}
+
+static bool index_path(int index, char *dest, unsigned capacity)
+{
+    const char *relative = track_at(index);
+    if (!*relative || strlen(relative) + 8u > capacity) return false;
+    aster_snprintf(dest, capacity, "/music/%s", relative);
+    return true;
+}
+
 static void settle_scan_selection(void)
 {
-    if (!library_scanned || !track_count || bluetooth_input())
-        return;
-    for (int i = 0; i < track_count; i++) {
-        char path[256];
-        aster_snprintf(path, sizeof(path), "/music/%s", tracks[i]);
-        if (!strcmp(path, selected_file))
-            return;
-    }
+    if (!library_scanned || !track_count || bluetooth_input()) return;
+    if (!strncmp(selected_file, "/music/", 7) &&
+        hifi_catalog_find(selected_file + 7) >= 0) return;
     char first[256];
-    aster_snprintf(first, sizeof(first), "/music/%s", tracks[0]);
-    select_track(first);
+    if (index_path(0, first, sizeof(first))) select_track(first);
 }
 
 static void scan_close(void)
 {
-    if (directory)
-        aster_fs_closedir(directory);
-    directory = 0;
+    hifi_catalog_close();
 }
 
 static void scan_start(void)
 {
-    scan_close();
-    track_count = library_page = 0;
-    library_scanned = false;
-    scan_error = aster_fs_opendir("/music", 6, &directory);
-    if (scan_error < 0) {
-        directory = 0;
-        library_scanned = true;
-    }
+    hifi_catalog_start();
+    hifi_catalog_status_t status = hifi_catalog_status();
+    track_count = (int)status.count;
+    catalog_generation = status.generation;
+    library_page = 0;
+    scan_error = status.error;
+    library_scanned = !status.scanning || status.has_saved;
+    /* A cached catalog is immediately browsable while SD scanning continues. */
+    if (status.has_saved) settle_scan_selection();
 }
 
 static void scan_tick(void)
 {
-    for (unsigned i = 0; directory && i < 4; i++) {
-        char name[256];
-        uint32_t is_dir = 0;
-        int n = aster_fs_dir_next(directory, name, sizeof(name), &is_dir);
-        if (n <= 0) {
-            scan_error = n;
-            scan_close();
-            library_scanned = true;
-            settle_scan_selection();
-        } else if (!is_dir && (size_t)n < sizeof(tracks[0])) {
-            name[n] = 0;
-            if (*format(name)) {
-                memcpy(tracks[track_count++], name, n + 1);
-                if (!selected_file[0] && !bluetooth_input()) {
-                    char first[256];
-                    aster_snprintf(first, sizeof(first), "/music/%s", name);
-                    select_track(first);
-                }
-                if (track_count == TRACK_LIMIT) {
-                    scan_close();
-                    library_scanned = true;
-                    settle_scan_selection();
-                }
-            }
-        }
-        if (page == LIBRARY)
-            dirty = true;
+    hifi_catalog_tick();
+    hifi_catalog_status_t status = hifi_catalog_status();
+    int prior = track_count;
+    bool was_scanned = library_scanned;
+    uint32_t old_generation = catalog_generation;
+    track_count = (int)status.count;
+    catalog_generation = status.generation;
+    scan_error = status.error;
+    library_scanned = !status.scanning || status.has_saved;
+    if (prior != track_count || was_scanned != library_scanned ||
+        old_generation != catalog_generation) {
+        if (library_page >= (track_count + ROWS - 1) / ROWS)
+            library_page = track_count ? (track_count - 1) / ROWS : 0;
+        dirty = true;
     }
+    if (!selected_file[0] && track_count && !bluetooth_input()) {
+        char first[256];
+        if (index_path(0, first, sizeof(first))) select_track(first);
+    }
+    if (!status.scanning && (old_generation != catalog_generation ||
+                             !was_scanned))
+        settle_scan_selection();
 }
 
 static void lyrics_close(void)
@@ -1324,10 +1333,20 @@ static int current_index(void)
     const char *path = display_track();
     if (strncmp(path, "/music/", 7))
         return -1;
-    for (int i = 0; i < track_count; i++)
-        if (!strcmp(path + 7, tracks[i]))
-            return i;
-    return -1;
+    /* A full 4k+ library search costs thousands of SD seeks. Cache the
+     * lookup across frames and invalidate it on Catalog generation changes. */
+    static char lookup[256];
+    static uint32_t lookup_generation;
+    static int lookup_count = -1;
+    static int lookup_index = -1;
+    if (lookup_generation == catalog_generation && lookup_count == track_count &&
+        !strcmp(lookup, path))
+        return lookup_index;
+    aster_snprintf(lookup, sizeof(lookup), "%s", path);
+    lookup_generation = catalog_generation;
+    lookup_count = track_count;
+    lookup_index = hifi_catalog_find(path + 7);
+    return lookup_index;
 }
 
 static int page_count(void)
@@ -1338,8 +1357,10 @@ static int page_count(void)
 static void library(void)
 {
     char temp[256];
-    if (!library_scanned)
-        aster_snprintf(temp, sizeof(temp), "正在读取 SD / music");
+    hifi_catalog_status_t catalog = hifi_catalog_status();
+    if (catalog.scanning)
+        aster_snprintf(temp, sizeof(temp), "扫描中 %u / 已索引 %d", catalog.discovered,
+                       track_count);
     else
         aster_snprintf(temp, sizeof(temp), "SD / music · %d 首", track_count);
     text(25, 71, 252, 18, muted, temp, LEFT);
@@ -1356,9 +1377,10 @@ static void library(void)
             line(22, y + ROW_H - 2, 438, y + ROW_H - 2, rail);
         aster_snprintf(temp, sizeof(temp), "%02d", index + 1);
         text(33, y + 18, 45, 18, gold, temp, LEFT);
-        display_name(tracks[index], temp);
+        const char *entry = track_at(index);
+        display_name(entry, temp);
         text(77, y + 13, 260, 24, ink, temp, LEFT);
-        text(351, y + 19, 69, 18, muted, format(tracks[index]), RIGHT);
+        text(351, y + 19, 69, 18, muted, format(entry), RIGHT);
     }
     if (!track_count && library_scanned) {
         text(26, 200, 408, 19, ink,
@@ -1527,7 +1549,9 @@ static int automatic_next(void)
     if (!library_scanned || seeking != SEEK_IDLE || !playing_track[0] || strcmp(playing_track, path))
         return -1;
     playing_track[0] = 0;
-    int index = current_index();
+    /* ENDED is no longer considered active by display_track(); resolve the
+     * actual ended player.path, not a separately saved UI selection. */
+    int index = hifi_catalog_find(path + 7);
     if (index < 0 || scan_error < 0)
         return -1;
     if (playback_mode == ORDER_REPEAT)
@@ -1590,8 +1614,7 @@ static void play_index(int index)
     if (index < 0 || index >= track_count)
         return;
     char path[256];
-    aster_snprintf(path, sizeof(path), "/music/%s", tracks[index]);
-    queue_track(path);
+    if (index_path(index, path, sizeof(path))) queue_track(path);
 }
 
 static void change_library_page(int step)
@@ -1792,7 +1815,7 @@ static void poll(uint32_t now)
         }
         int index = automatic_next();
         if (index >= 0)
-            aster_snprintf(queued_file, sizeof(queued_file), "/music/%s", tracks[index]);
+            (void)index_path(index, queued_file, sizeof(queued_file));
         if (queued_file[0] && player.mode == ASTER_PLAYER_LOCAL && !media_in_use())
             start_queued(now);
     }
