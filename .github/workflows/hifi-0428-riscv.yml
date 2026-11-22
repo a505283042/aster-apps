@@ -1,0 +1,64 @@
+name: HiFiPlayer 0.4.28 RISC-V AOT
+on:
+  push:
+    branches:
+      - fix/hifi-unlimited-autoplay
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  hifi-riscv:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout HiFiPlayer
+        uses: actions/checkout@v4
+        with:
+          sparse-checkout: |
+            HiFiPlayer
+          sparse-checkout-cone-mode: true
+
+      - name: Checkout Aster SDK (ABI 4.5)
+        uses: actions/checkout@v4
+        with:
+          repository: a505283042/aster-sdk
+          ref: main
+          path: aster-sdk
+
+      - name: Verify SDK ABI and compilers
+        run: |
+          python3 --version
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          target = json.loads(Path("aster-sdk/targets/riscv.json").read_text())
+          assert target["abi"] == "4.5.0", target
+          assert target["aot_profile"] == "rv32-ilp32f-interruptible", target
+          print("SDK ABI:", target["abi"])
+          PY
+          test -x aster-sdk/toolchain/wamrc
+          test -x aster-sdk/toolchain/wasi-sdk-24.0-x86_64-linux/bin/clang
+          aster-sdk/toolchain/wamrc --version || true
+
+      - name: Install Python dependencies
+        run: python3 -m pip install -r aster-sdk/requirements.txt
+
+      - name: Build AOT APP 0.4.28
+        run: |
+          python3 aster-sdk/tools/aster.py build "$GITHUB_WORKSPACE/HiFiPlayer" --target riscv --aot
+          test -s HiFiPlayer/dist/riscv/aster.hifi.ast
+
+      - name: Verify package
+        run: |
+          python3 aster-sdk/tools/aster.py verify HiFiPlayer/dist/riscv/aster.hifi.ast --target riscv
+          sha256sum HiFiPlayer/dist/riscv/aster.hifi.ast
+
+      - name: Upload installable .ast
+        uses: actions/upload-artifact@v4
+        with:
+          name: Aster-HiFiPlayer-0.4.28-riscv
+          path: HiFiPlayer/dist/riscv/aster.hifi.ast
+          if-no-files-found: error
+          retention-days: 14
