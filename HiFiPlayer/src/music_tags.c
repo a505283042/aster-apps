@@ -9,7 +9,11 @@
 #include "music_tags.h"
 #include <aster_imports.h>
 
-enum { TAG_READ_CAP = 512, TAG_FRAME_LIMIT = 256, TAG_COMMENT_LIMIT = 256 };
+/* FakePod_S31 caps: scan past long artwork/text tags without truncating
+ * ordinary UTF-8 names to the old 63-byte/512-byte limits. Text fields are
+ * still strictly bounded and artwork bytes are skipped by offset. */
+enum { TAG_READ_CAP = 16 * 1024, TAG_FRAME_LIMIT = 2048,
+       TAG_COMMENT_LIMIT = 4096 };
 static uint8_t scratch[TAG_READ_CAP];
 
 static uint32_t be32(const uint8_t *p)
@@ -129,16 +133,87 @@ static uint16_t positive_from(const char *text)
         val=val*10u+(uint32_t)(text[i]-'0');
     return (uint16_t)(val<=65535u ? val : 0);
 }
+static void trim_ascii(char *value)
+{
+    unsigned start=0, len=(unsigned)strlen(value);
+    while (start<len && (value[start]==' ' || value[start]=='\t' ||
+                         value[start]=='\r' || value[start]=='\n')) start++;
+    while (len>start && (value[len-1]==' ' || value[len-1]=='\t' ||
+                         value[len-1]=='\r' || value[len-1]=='\n')) len--;
+    if (start) memmove(value,value+start,len-start);
+    value[len-start]=0;
+}
+
+/* Original FakePod joins all TPE1/ARTIST values using " / ". Keep only
+ * complete, UTF-8-valid pieces and avoid duplicate artist entries. */
+static void append_artist(hifi_tags_t *m, const char *value)
+{
+    if (!value || !*value) return;
+    char clean[HIFI_TAG_TEXT_MAX]={0};
+    aster_snprintf(clean,sizeof(clean),"%s",value);
+    trim_ascii(clean);
+    if (!*clean) return;
+    if (!m->artist[0]) {
+        aster_snprintf(m->artist,sizeof(m->artist),"%s",clean);
+        return;
+    }
+    /* Avoid duplicating a repeated Vorbis ARTIST or ID3 multi-value. */
+    const char *cursor=m->artist;
+    size_t len=strlen(clean);
+    while (*cursor) {
+        if (!strncmp(cursor,clean,len) &&
+            (cursor[len]==0 || !strncmp(cursor+len," / ",3)))
+            return;
+        const char *next=strstr(cursor," / ");
+        if (!next) break;
+        cursor=next+3;
+    }
+    size_t used=strlen(m->artist);
+    if (used+3u+len>=sizeof(m->artist)) return;
+    memcpy(m->artist+used," / ",3);
+    memcpy(m->artist+used+3,clean,len+1);
+}
+
+/* ID3v2.4 TPE1 can contain NUL-separated performer names; v2.2/2.3
+ * normally expose a single text field. Support UTF-8, Latin-1 and
+ * UTF-16 (including BOM) without reading the embedded picture payload. */
+static void append_artist_segments(hifi_tags_t *m, const uint8_t *value,
+                                   uint32_t bytes, uint32_t encoding)
+{
+    uint32_t at=0;
+    while (at<bytes) {
+        uint32_t end=at;
+        if (encoding==1u || encoding==2u) {
+            while (end+1u<bytes && (value[end] || value[end+1])) end+=2;
+        } else {
+            while (end<bytes && value[end]) end++;
+        }
+        if (end>at) {
+            char item[HIFI_TAG_TEXT_MAX]={0};
+            decode_text(item,sizeof(item),value+at,end-at,encoding);
+            append_artist(m,item);
+        }
+        if (end>=bytes) break;
+        at=end+((encoding==1u || encoding==2u)?2u:1u);
+    }
+}
+
 static void apply_field(hifi_tags_t *m, const char *id, const uint8_t *value,
-                        uint32_t bytes, uint32_t encoding, bool short_id)
+                        uint32_t bytes, uint32_t encoding, bool short_id,
+                        bool multi_artist)
 {
     char tmp[HIFI_TAG_TEXT_MAX] = {0};
     decode_text(tmp, sizeof(tmp), value, bytes, encoding);
+    trim_ascii(tmp);
     if (!tmp[0]) return;
     if (!strcmp(id, short_id ? "TT2" : "TIT2"))
         aster_snprintf(m->title, sizeof(m->title), "%s", tmp);
-    else if (!strcmp(id, short_id ? "TP1" : "TPE1"))
-        aster_snprintf(m->artist, sizeof(m->artist), "%s", tmp);
+    else if (!strcmp(id, short_id ? "TP1" : "TPE1")) {
+        if (multi_artist)
+            append_artist_segments(m,value,bytes,encoding);
+        else
+            append_artist(m,tmp);
+    }
     else if (!strcmp(id, short_id ? "TP2" : "TPE2"))
         aster_snprintf(m->album_artist, sizeof(m->album_artist), "%s", tmp);
     else if (!strcmp(id, short_id ? "TAL" : "TALB"))
@@ -159,7 +234,10 @@ static void parse_id3(aster_handle_t file, uint32_t bytes, hifi_tags_t *m)
         memcmp(head,"ID3",3) || head[3]<2 || head[3]>4) return;
     uint32_t version=head[3], end=10u+sync32(head+6), pos=10;
     if (end>bytes) end=bytes;
-    if (head[5]&0x40u) {
+    /* v2.2/v2.3 whole-tag unsynchronisation changes frame offsets.
+     * As in FakePod_S31, skip unsupported tag rather than misread artists. */
+    if ((head[5]&0x80u) && version<4u) return;
+    if (head[5]&0x40u && version>=3u) {
         uint8_t ext[4];
         if (!read_at(file,pos,ext,4)) return;
         uint32_t n=version==4u ? sync32(ext) : be32(ext)+4u;
@@ -185,7 +263,13 @@ static void parse_id3(aster_handle_t file, uint32_t bytes, hifi_tags_t *m)
         if (text && size>1 && size<=TAG_READ_CAP &&
             read_at(file,payload,scratch,size)) {
             uint8_t encoding=scratch[0];
-            apply_field(m,id,scratch+1,size-1,encoding,version==2u);
+            /* Skip compressed/encrypted/unsynchronised per-frame variants
+             * rather than interpreting their bytes as plain UTF strings. */
+            bool unsupported=version==3u ? (hdr[9]&0xe0u)!=0 :
+                             version==4u ? (hdr[9]&0x4fu)!=0 : false;
+            if (!unsupported)
+                apply_field(m,id,scratch+1,size-1,encoding,version==2u,
+                            version==4u);
         }
         pos=payload+size;
     }
@@ -201,7 +285,7 @@ static void parse_id3v1(aster_handle_t file, uint32_t size, hifi_tags_t *m)
     }
     if (!m->artist[0]) {
         decode_text(tmp,sizeof(tmp),tail+33,30,0);
-        aster_snprintf(m->artist,sizeof(m->artist),"%s",tmp);
+        append_artist(m,tmp);
     }
     if (!m->album[0]) {
         decode_text(tmp,sizeof(tmp),tail+63,30,0);
@@ -231,11 +315,12 @@ static void apply_comment(hifi_tags_t *m, const uint8_t *buf, uint32_t bytes)
     char key[32]={0}, val[HIFI_TAG_TEXT_MAX]={0};
     memcpy(key,buf,equals);
     copy_utf8(val,sizeof(val),buf+equals+1,bytes-equals-1);
+    trim_ascii(val);
     if (!val[0]) return;
     if (key_equal(key,"TITLE"))
         aster_snprintf(m->title,sizeof(m->title),"%s",val);
     else if(key_equal(key,"ARTIST"))
-        aster_snprintf(m->artist,sizeof(m->artist),"%s",val);
+        append_artist(m,val);
     else if(key_equal(key,"ALBUM"))
         aster_snprintf(m->album,sizeof(m->album),"%s",val);
     else if(key_equal(key,"ALBUMARTIST") || key_equal(key,"ALBUM ARTIST"))
