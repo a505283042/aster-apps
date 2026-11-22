@@ -2024,6 +2024,14 @@ static void step_idle_library(int direction)
         return;
     }
     int index=current_index();
+    if (index<0 && !hifi_catalog_lookup_ready()) {
+        /* At cold launch, the saved HIF2 exists but its hash table may only
+         * have loaded the first few rows. Resolve the actual selected track
+         * once on this idle button press, not as part of any frame draw. */
+        const char *path=display_track();
+        if (!strncmp(path,"/music/",7))
+            index=hifi_catalog_find_for_idle_step(path+7);
+    }
     int next=0;
     if (index>=0) {
         if (playback_mode==ORDER_SHUFFLE && track_count>1) {
