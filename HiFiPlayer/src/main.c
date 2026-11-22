@@ -10,9 +10,12 @@
 #include "paper.h"
 #include "shake.h"
 
-/* Optional ABI 4.5 extension; the installed SDK 4.5.0 can build this APP.
- * These constants match aster-firmware contract/include/aster/player.h.
- * Capability-gate all uses so alpha.6 still runs safely on older firmware. */
+/* Optional player capabilities introduced by firmware after SDK 4.5.0.
+ * SDK 4.5.0's player.h has no AUTO_NEXT or QUEUE_MODE constants yet;
+ * preserve ABI layout and feature-detect the actual firmware at runtime. */
+#ifndef ASTER_PLAYER_CAP_AUTO_NEXT
+#define ASTER_PLAYER_CAP_AUTO_NEXT 128u
+#endif
 #ifndef ASTER_PLAYER_CAP_QUEUE_MODE
 #define ASTER_PLAYER_CAP_QUEUE_MODE 256u
 #endif
