@@ -11,14 +11,17 @@
 #include <aster_imports.h>
 
 enum { ART_MAX = 3072, ALB_MAX = 4096, YEAR_MAX = 32, SLOT_COUNT = 8192,
+       NAME_POOL_BYTES = 512 * 1024,
        META_PERIOD_IDLE_MS = 26, META_PERIOD_PLAY_MS = 240 };
+/* S31-style string interning: avoid allocating 128 bytes per album row.
+ * A zero offset is the empty string. Store album artist by artist ID so
+ * multi-track albums do not duplicate the same name hundreds of times. */
 typedef struct {
-    char name[64];
-    uint32_t hash, count;
+    uint32_t name_off, hash, count;
 } artist_row_t;
 typedef struct {
-    char title[64], artist[64];
-    uint32_t hash, count;
+    uint32_t title_off, hash, count;
+    uint16_t album_artist_id, reserved;
 } album_row_t;
 typedef struct {
     uint16_t decade;
@@ -26,11 +29,14 @@ typedef struct {
     uint32_t count;
 } decade_row_t;
 
+static char name_pool[NAME_POOL_BYTES];
+static uint32_t name_pool_used;
 static artist_row_t artists[ART_MAX];
 static album_row_t albums[ALB_MAX];
 static decade_row_t decades[YEAR_MAX];
 static uint16_t artist_slots[SLOT_COUNT], album_slots[SLOT_COUNT];
 static uint16_t track_artists[HIFI_CATALOG_TRACK_MAX];
+static uint16_t track_album_artists[HIFI_CATALOG_TRACK_MAX];
 static uint16_t track_albums[HIFI_CATALOG_TRACK_MAX];
 static uint16_t track_decades[HIFI_CATALOG_TRACK_MAX];
 static uint16_t selected_tracks[HIFI_CATALOG_TRACK_MAX];
@@ -44,6 +50,19 @@ static uint32_t hash_string(uint32_t hash, const char *text)
     while (*text) hash = (hash ^ (uint8_t)*text++) * 16777619u;
     return hash;
 }
+static uint32_t store_name(const char *name)
+{
+    unsigned count=(unsigned)strlen(name)+1u;
+    if (count>NAME_POOL_BYTES-name_pool_used) return UINT32_MAX;
+    uint32_t offset=name_pool_used;
+    memcpy(name_pool+offset,name,count);
+    name_pool_used+=count;
+    return offset;
+}
+static const char *pool_name(uint32_t off)
+{
+    return off<name_pool_used ? name_pool+off : "";
+}
 static uint16_t group_artist(const char *name)
 {
     uint32_t hash=hash_string(2166136261u,name);
@@ -52,20 +71,25 @@ static uint16_t group_artist(const char *name)
         uint16_t val=artist_slots[slot];
         if (!val) {
             if (artist_count>=ART_MAX) return HIFI_GROUP_NONE;
+            uint32_t off=store_name(name);
+            if (off==UINT32_MAX) return HIFI_GROUP_NONE;
             artist_row_t *row=&artists[artist_count];
-            row->hash=hash;row->count=0;
-            aster_snprintf(row->name,sizeof(row->name),"%s",name);
+            row->name_off=off;row->hash=hash;row->count=0;
             artist_slots[slot]=(uint16_t)(++artist_count);
             return (uint16_t)(artist_count-1);
         }
         artist_row_t *row=&artists[val-1u];
-        if (row->hash==hash && !strcmp(row->name,name))return (uint16_t)(val-1u);
+        if (row->hash==hash && !strcmp(pool_name(row->name_off),name))
+            return (uint16_t)(val-1u);
         slot=(slot+1u)&(SLOT_COUNT-1u);
     }
     return HIFI_GROUP_NONE;
 }
-static uint16_t group_album(const char *title, const char *album_artist)
+static uint16_t group_album(const char *title, uint16_t album_artist_id)
 {
+    if (album_artist_id==HIFI_GROUP_NONE || album_artist_id>=artist_count)
+        return HIFI_GROUP_NONE;
+    const char *album_artist=pool_name(artists[album_artist_id].name_off);
     uint32_t hash=hash_string(2166136261u,title);
     hash=hash_string(hash,"/");
     hash=hash_string(hash,album_artist);
@@ -73,17 +97,19 @@ static uint16_t group_album(const char *title, const char *album_artist)
     for (uint32_t i=0;i<SLOT_COUNT;i++) {
         uint16_t val=album_slots[slot];
         if (!val) {
-            if(album_count>=ALB_MAX)return HIFI_GROUP_NONE;
+            if (album_count>=ALB_MAX) return HIFI_GROUP_NONE;
+            uint32_t off=store_name(title);
+            if (off==UINT32_MAX) return HIFI_GROUP_NONE;
             album_row_t *row=&albums[album_count];
-            row->hash=hash;row->count=0;
-            aster_snprintf(row->title,sizeof(row->title),"%s",title);
-            aster_snprintf(row->artist,sizeof(row->artist),"%s",album_artist);
+            row->title_off=off;row->hash=hash;row->count=0;
+            row->album_artist_id=album_artist_id;
             album_slots[slot]=(uint16_t)(++album_count);
             return (uint16_t)(album_count-1);
         }
         album_row_t *row=&albums[val-1u];
-        if (row->hash==hash && !strcmp(row->title,title) &&
-            !strcmp(row->artist,album_artist))return (uint16_t)(val-1u);
+        if (row->hash==hash && row->album_artist_id==album_artist_id &&
+            !strcmp(pool_name(row->title_off),title))
+            return (uint16_t)(val-1u);
         slot=(slot+1u)&(SLOT_COUNT-1u);
     }
     return HIFI_GROUP_NONE;
@@ -103,6 +129,8 @@ void hifi_groups_start(void)
 {
     hifi_catalog_status_t s=hifi_catalog_status();
     artist_count=album_count=decade_count=processed=errors=selected_count=0;
+    name_pool_used=1;
+    name_pool[0]=0;
     expected_count=s.count;
     expected_generation=s.generation;
     last_tick=0;
@@ -139,17 +167,23 @@ void hifi_groups_tick(bool playback_active)
     const char *artist=tags.artist[0]?tags.artist:"未知歌手";
     const char *album=tags.album[0]?tags.album:"未知专辑";
     const char *album_artist=tags.album_artist[0]?tags.album_artist:artist;
-    uint16_t a=group_artist(artist), b=group_album(album,album_artist);
+    uint16_t a=group_artist(artist);
+    uint16_t album_a=group_artist(album_artist);
+    uint16_t b=group_album(album,album_a);
     uint16_t year=tags.original_year?tags.original_year:tags.year;
     uint16_t d=group_decade(year);
-    if (a==HIFI_GROUP_NONE||b==HIFI_GROUP_NONE||d==HIFI_GROUP_NONE) {
+    if (a==HIFI_GROUP_NONE||album_a==HIFI_GROUP_NONE||
+        b==HIFI_GROUP_NONE||d==HIFI_GROUP_NONE) {
         blocked=true;
         aster_printf("HiFi tags group capacity at %u artists=%u albums=%u",
                      idx,artist_count,album_count);
         return;
     }
-    track_artists[idx]=a;track_albums[idx]=b;track_decades[idx]=d;
-    artists[a].count++;albums[b].count++;decades[d].count++;
+    track_artists[idx]=a;track_album_artists[idx]=album_a;
+    track_albums[idx]=b;track_decades[idx]=d;
+    artists[a].count++;
+    if (a!=album_a) artists[album_a].count++;
+    albums[b].count++;decades[d].count++;
     processed++;
     if ((processed%256u)==0u)
         aster_printf("HiFi tags progress=%u/%u",processed,expected_count);
@@ -172,11 +206,14 @@ bool hifi_groups_get(int mode,uint32_t group_index,hifi_group_info_t *out)
     if(!out || !ready)return false;
     *out=(hifi_group_info_t){0};
     if(mode==HIFI_GROUP_ARTISTS && group_index<artist_count){
-        aster_snprintf(out->title,sizeof(out->title),"%s",artists[group_index].name);
+        aster_snprintf(out->title,sizeof(out->title),"%s",
+                       pool_name(artists[group_index].name_off));
         out->songs=artists[group_index].count;
     } else if(mode==HIFI_GROUP_ALBUMS && group_index<album_count) {
-        aster_snprintf(out->title,sizeof(out->title),"%s",albums[group_index].title);
-        aster_snprintf(out->artist,sizeof(out->artist),"%s",albums[group_index].artist);
+        aster_snprintf(out->title,sizeof(out->title),"%s",
+                       pool_name(albums[group_index].title_off));
+        aster_snprintf(out->artist,sizeof(out->artist),"%s",
+                       pool_name(artists[albums[group_index].album_artist_id].name_off));
         out->songs=albums[group_index].count;
     } else if(mode==HIFI_GROUP_DECADES && group_index<decade_count){
         out->decade=decades[group_index].decade;
@@ -197,7 +234,9 @@ bool hifi_groups_select(int mode,uint32_t group_index)
     for(uint32_t i=0;i<processed;i++){
         uint16_t key=mode==HIFI_GROUP_ARTISTS?track_artists[i]:
                      mode==HIFI_GROUP_ALBUMS?track_albums[i]:track_decades[i];
-        if(key==match)selected_tracks[selected_count++]=(uint16_t)i;
+        if (key==match ||
+            (mode==HIFI_GROUP_ARTISTS && track_album_artists[i]==match))
+            selected_tracks[selected_count++]=(uint16_t)i;
     }
     return true;
 }
