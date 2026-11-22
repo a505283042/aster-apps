@@ -405,7 +405,8 @@ static bool index_path(int index, char *dest, unsigned capacity)
 
 static void settle_scan_selection(void)
 {
-    if (!library_scanned || !track_count || bluetooth_input()) return;
+    if (!library_scanned || !track_count || bluetooth_input() ||
+        !hifi_catalog_lookup_ready()) return;
     if (!strncmp(selected_file, "/music/", 7) &&
         hifi_catalog_find(selected_file + 7) >= 0) return;
     char first[256];
@@ -451,8 +452,8 @@ static void scan_tick(void)
         char first[256];
         if (index_path(0, first, sizeof(first))) select_track(first);
     }
-    if (!status.scanning && (old_generation != catalog_generation ||
-                             !was_scanned))
+    if (library_scanned && hifi_catalog_lookup_ready() &&
+        (old_generation != catalog_generation || !was_scanned))
         settle_scan_selection();
 }
 
@@ -1331,7 +1332,7 @@ static int current_index(void)
     if (bluetooth_input())
         return -1;
     const char *path = display_track();
-    if (strncmp(path, "/music/", 7))
+    if (strncmp(path, "/music/", 7) || !hifi_catalog_lookup_ready())
         return -1;
     /* A full 4k+ library search costs thousands of SD seeks. Cache the
      * lookup across frames and invalidate it on Catalog generation changes. */
