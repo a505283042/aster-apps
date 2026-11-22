@@ -64,6 +64,7 @@ static uint32_t hashes_a[HIFI_CATALOG_TRACK_MAX];
 static uint32_t hashes_b[HIFI_CATALOG_TRACK_MAX];
 static uint32_t *active_hashes = hashes_a, *staging_hashes = hashes_b;
 static uint32_t active_hash_loaded;
+static bool active_hash_failed;
 
 static bool read_exact(aster_handle_t file, void *dst, unsigned size)
 {
@@ -152,6 +153,7 @@ void hifi_catalog_close(void)
     active_slot = -1;
     scanning = verifying = has_saved = false;
     discovered = verify_bytes = active_hash_loaded = 0;
+    active_hash_failed = false;
     active_hashes = hashes_a;
     staging_hashes = hashes_b;
     generation = 0;
@@ -278,6 +280,7 @@ static void verify_tick(void)
     active_hashes = staging_hashes;
     staging_hashes = old_hashes;
     active_hash_loaded = discovered;
+    active_hash_failed = false;
     generation = committed.generation;
     has_saved = true;
     verifying = false;
@@ -336,7 +339,7 @@ void hifi_catalog_tick(void)
 {
     /* Warm the old snapshot's 4-byte lookup keys a few rows per frame.
      * Until complete, no call needs a multi-thousand-seek blocking search. */
-    for (unsigned i = 0; active && i < 4u &&
+    for (unsigned i = 0; active && !active_hash_failed && i < 4u &&
                          active_hash_loaded < committed.count; i++) {
         uint32_t offset = (uint32_t)sizeof(cat_header_t) +
                           active_hash_loaded * (uint32_t)sizeof(cat_row_t);
@@ -346,6 +349,7 @@ void hifi_catalog_tick(void)
             !memchr(row.name, 0, sizeof(row.name))) {
             /* Treat a damaged snapshot as unsearchable; scan continues and
              * can replace it without forcing a blocking recovery loop. */
+            active_hash_failed = true;
             active_hash_loaded = 0;
             break;
         }
@@ -471,7 +475,7 @@ bool hifi_catalog_path_at(uint32_t index, char *out, unsigned capacity)
 
 bool hifi_catalog_lookup_ready(void)
 {
-    if (active) return active_hash_loaded == committed.count;
+    if (active) return !active_hash_failed && active_hash_loaded == committed.count;
     return !scanning && !verifying && discovered > 0;
 }
 
