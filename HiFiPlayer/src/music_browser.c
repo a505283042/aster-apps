@@ -181,6 +181,12 @@ static bool open_snapshot(void)
     phase=FIDX_LOAD;
     return true;
 }
+void hifi_browser_close(void)
+{
+    close_io();
+    phase=FIDX_WAIT;
+    clear_tree();
+}
 void hifi_browser_start(void)
 {
     close_io();
