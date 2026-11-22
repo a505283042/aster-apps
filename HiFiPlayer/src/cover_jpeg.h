@@ -5,7 +5,7 @@
 #include <aster/fs.h>
 #include <stdbool.h>
 
-enum { COVER_EDGE = 208, COVER_WORK_BYTES = 16384 };
+enum { COVER_EDGE = 460, COVER_WORK_BYTES = 16384 };
 /* Caller owns the open file and the aligned workspace until the last step or
  * a track change. Only the selected picture's byte range can be read. */
 bool cover_jpeg_begin(aster_handle_t file, uint32_t offset, uint32_t length, unsigned cap,
