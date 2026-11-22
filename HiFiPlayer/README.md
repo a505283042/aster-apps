@@ -111,7 +111,7 @@ Hi-Fi 播放器 0.5.0-alpha.1，按 FAKE POD NANO PRO 的 460×460 方屏设计�
 连接电脑进入 USB 读卡器模式，安全地得到某个盘符（示例 `E:`）：
 
 ```powershell
-$sd = "E:"
+$sd = "E:\\"
 $source = "D:\ESP32\aster-apps\HiFiPlayer\text"
 $dest = Join-Path $sd "aster\shared\hifi\fonts"
 New-Item -ItemType Directory -Force -Path $dest | Out-Null
@@ -136,6 +136,15 @@ aster verify HiFiPlayer/dist/riscv/aster.hifi.ast
 ```
 
 随后再次进入 USB 读卡器模式，复制新 `HiFiPlayer/dist/riscv/aster.hifi.ast` 到 `<盘符>:\aster\install\aster.hifi.ast`，安全弹出后通过设备 shell `aster app install /SD:/aster/install/aster.hifi.ast` 安装。
+
+也可以只执行项目里新增的一条 PowerShell 命令（内置 **SHA256 校验**，并会一起复制字体许可证；拷贝前检查是否真的是带 `aster` 目录的 SD 盘）：
+
+```powershell
+cd D:\\ESP32\\aster-apps
+.\\HiFiPlayer\\tools\\install_shared_fonts.ps1 -Drive E:\\
+```
+
+这里的 `E:\\` 仅是示例，请根据 Windows 实际分配的 TF 卡盘符替换。脚本不会格式化、删除文件或重新烧录固件。
 
 ### 安全和兼容性
 
