@@ -56,10 +56,12 @@ static size_t read_stream(JDEC *jd, uint8_t *dst, size_t n)
     return done;
 }
 
-static void sample_axis(uint16_t *samples, unsigned n, unsigned src)
+/* Sample the centre square without first shrinking a rectangular cover to
+ * 460 pixels on its long edge. This preserves full resolution in the crop. */
+static void sample_axis(uint16_t *samples, unsigned n, unsigned offset, unsigned span)
 {
     for (unsigned i = 0; i < n; i++)
-        samples[i] = (2 * i + 1) * src / (2 * n);
+        samples[i] = (uint16_t)(offset + (2 * i + 1) * span / (2 * n));
 }
 
 bool cover_jpeg_begin(aster_handle_t file, uint32_t offset, uint32_t length, unsigned cap,
@@ -77,20 +79,17 @@ bool cover_jpeg_begin(aster_handle_t file, uint32_t offset, uint32_t length, uns
         !decoder.width || !decoder.height)
         return false;
 
-    unsigned w = decoder.width, h = decoder.height, edge = w > h ? w : h;
-    unsigned target = edge < cap ? edge : cap;
-    out_w = (w * target + edge / 2) / edge;
-    out_h = (h * target + edge / 2) / edge;
-    if (!out_w)
-        out_w = 1;
-    if (!out_h)
-        out_h = 1;
+    unsigned w = decoder.width, h = decoder.height;
+    out_w = out_h = cap;
     unsigned shift = 0;
-    while (shift < 3 && (w >> (shift + 1)) >= out_w && (h >> (shift + 1)) >= out_h)
+    while (shift < 3 && (w >> (shift + 1)) >= cap && (h >> (shift + 1)) >= cap)
         shift++;
     decoder.scale = shift;
-    sample_axis(sample_x, out_w, w >> shift);
-    sample_axis(sample_y, out_h, h >> shift);
+    w >>= shift;
+    h >>= shift;
+    unsigned side = w < h ? w : h;
+    sample_axis(sample_x, out_w, (w - side) / 2, side);
+    sample_axis(sample_y, out_h, (h - side) / 2, side);
     mcu_x = mcu_y = 0;
     output = pixels;
     return true;
