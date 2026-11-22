@@ -6,6 +6,7 @@
 #include "lrc.h"
 #include "music_catalog.h"
 #include "music_browser.h"
+#include "music_groups.h"
 #include "paper.h"
 #include "shake.h"
 
@@ -20,7 +21,11 @@ enum control {
     NEXT,
     DEMO,
     LIB_ALL,
+    LIB_ARTISTS,
+    LIB_ALBUMS,
+    LIB_DECADES,
     LIB_FOLDERS,
+    LIB_RESCAN,
     MODE,
     PAGE_PREV,
     PAGE_NEXT,
@@ -69,8 +74,19 @@ static int left, top;
 static aster_player_info_t player;
 static uint32_t last_poll, visible_second;
 static int library_page, track_count, scan_error;
-enum library_mode { LIBRARY_ALL_TRACKS, LIBRARY_FOLDER_TREE };
+enum library_mode { LIBRARY_ALL_TRACKS, LIBRARY_ARTISTS, LIBRARY_ALBUMS,
+                    LIBRARY_DECADES, LIBRARY_FOLDER_TREE };
 static enum library_mode library_mode = LIBRARY_ALL_TRACKS;
+static int library_detail_group = -1;
+static bool rescan_armed;
+static uint32_t rescan_deadline;
+static int library_group_mode(void)
+{
+    return library_mode == LIBRARY_ARTISTS ? HIFI_GROUP_ARTISTS :
+           library_mode == LIBRARY_ALBUMS ? HIFI_GROUP_ALBUMS :
+           library_mode == LIBRARY_DECADES ? HIFI_GROUP_DECADES : 0;
+}
+
 static bool dirty, library_scanned, controls_visible = true;
 /* Full-art page uses an explicit native surface present, never a zero-command GE flush. */
 static bool bright_pending = true;
@@ -434,6 +450,8 @@ static void scan_start(void)
     scan_error = status.error;
     library_scanned = !status.scanning || status.has_saved;
     lookup_was_ready = hifi_catalog_lookup_ready();
+    library_detail_group = -1;
+    hifi_groups_start();
     /* A cached catalog is immediately browsable while SD scanning continues. */
     if (status.has_saved) settle_scan_selection();
     if (library_mode == LIBRARY_FOLDER_TREE)
@@ -456,6 +474,8 @@ static void scan_tick(void)
     uint32_t old_generation = catalog_generation;
     track_count = (int)status.count;
     catalog_generation = status.generation;
+    if (old_generation != catalog_generation)
+        library_detail_group = -1;
     scan_error = status.error;
     library_scanned = !status.scanning || status.has_saved;
     bool lookup_ready = hifi_catalog_lookup_ready();
@@ -847,11 +867,17 @@ static void frame_chrome(void)
     aster_ge_clear(&gfx, background);
     if (page == LIBRARY) {
         if (library_mode == LIBRARY_FOLDER_TREE && hifi_browser_folder()[0]) {
-            text(22, 17, 338, 23, ink, hifi_browser_folder(), LEFT);
+            text(22, 17, 242, 23, ink, hifi_browser_folder(), LEFT);
+        } else if (library_group_mode() && library_detail_group >= 0) {
+            hifi_group_info_t info = {0};
+            if (hifi_groups_get(library_group_mode(), (uint32_t)library_detail_group, &info))
+                text(22, 17, 242, 23, ink, info.title, LEFT);
         } else {
-            text(22, 17, 173, 24, ink, "本地曲库", LEFT);
-            text(260, 20, 109, 18, muted, source_label(), RIGHT);
+            text(22, 17, 242, 24, ink, "本地曲库", LEFT);
         }
+        box(276, 9, 96, 46, 12, finger.control == LIB_RESCAN ? panel : chrome, false);
+        text(280, 22, 89, 18, rescan_armed ? gold : muted,
+             rescan_armed ? "确认重扫" : "重扫", CENTER);
     }
     /* Lyrics and library share an explicit return-to-player button. */
     box(382, 9, 67, 46, 12, finger.control == BACK ? panel : chrome, false);
@@ -1375,7 +1401,11 @@ static int current_index(void)
 
 static int library_item_count(void)
 {
-    return library_mode == LIBRARY_FOLDER_TREE ? (int)hifi_browser_count() : track_count;
+    if (library_mode == LIBRARY_FOLDER_TREE) return (int)hifi_browser_count();
+    int type=library_group_mode();
+    if (type) return library_detail_group >= 0 ?
+        (int)hifi_groups_selection_count() : (int)hifi_groups_count(type);
+    return track_count;
 }
 
 static int page_count(void)
@@ -1386,86 +1416,112 @@ static int page_count(void)
 
 static void library(void)
 {
+    static const char *const labels[5] = {
+        "全部", "歌手", "专辑", "年代", "文件夹"
+    };
     char temp[256];
     int visible = library_item_count();
-    hifi_catalog_status_t catalog = hifi_catalog_status();
+    int group_type = library_group_mode();
     bool folder_view = library_mode == LIBRARY_FOLDER_TREE;
+    bool group_root = group_type && library_detail_group < 0;
+    hifi_catalog_status_t catalog = hifi_catalog_status();
 
-    /* Aster analogue of S31's persistent top-level browsing scope.
-     * Metadata categories are deliberately not faked from filenames. */
-    box(17, 61, 203, 40, 10, !folder_view ? selected : chrome, false);
-    box(239, 61, 203, 40, 10, folder_view ? selected : chrome, false);
-    aster_snprintf(temp, sizeof(temp), "全部歌曲 %d", track_count);
-    text(25, 68, 188, 19, !folder_view ? gold : ink, temp, CENTER);
-    text(251, 68, 176, 19, folder_view ? gold : ink, "文件夹", CENTER);
+    for (int tab=0;tab<5;tab++) {
+        bool chosen = (int)library_mode == tab;
+        int x=10+tab*88;
+        box(x, 61, 86, 40, 9, chosen ? selected : chrome, false);
+        text(x+3, 69, 80, 18, chosen ? gold : ink, labels[tab], CENTER);
+    }
 
     int active = current_index();
-    for (int row = 0; row < ROWS; row++) {
-        int index = library_page * ROWS + row, y = ROW_TOP + row * ROW_H;
-        if (index >= visible)
-            break;
-
-        const char *filename = "";
-        char meta[32] = "";
-        bool is_folder = false;
-        int track_id = index;
-        hifi_browser_entry_t entry = {0};
+    for (int row=0;row<ROWS;row++) {
+        int index=library_page*ROWS+row;
+        int y=ROW_TOP+row*ROW_H;
+        if (index>=visible)break;
+        const char *filename="";
+        char meta[32]={0};
+        hifi_browser_entry_t entry={0};
+        hifi_group_info_t info={0};
+        bool is_folder=false, is_group=false;
+        int track_id=index;
         if (folder_view) {
-            if (!hifi_browser_entry((uint32_t)index, &entry))
-                continue;
-            is_folder = entry.folder;
-            filename = entry.name;
-            if (is_folder)
-                aster_snprintf(meta, sizeof(meta), "%u 首", entry.songs);
+            if (!hifi_browser_entry((uint32_t)index,&entry))continue;
+            filename=entry.name;
+            is_folder=entry.folder;
+            if (is_folder) aster_snprintf(meta,sizeof(meta),"%u 首",entry.songs);
             else {
-                track_id = (int)entry.track_index;
-                aster_snprintf(meta, sizeof(meta), "%s", format(filename));
+                track_id=(int)entry.track_index;
+                aster_snprintf(meta,sizeof(meta),"%s",format(filename));
             }
+        } else if (group_root) {
+            if (!hifi_groups_get(group_type,(uint32_t)index,&info))continue;
+            filename=info.title;
+            is_group=true;
+            track_id=-1;
+            aster_snprintf(meta,sizeof(meta),"%u 首",info.songs);
+        } else if (group_type) {
+            uint32_t id=0;
+            if (!hifi_groups_selection_track((uint32_t)index,&id))continue;
+            track_id=(int)id;
+            filename=track_at(track_id);
+            aster_snprintf(meta,sizeof(meta),"%s",format(filename));
         } else {
-            filename = track_at(index);
-            aster_snprintf(meta, sizeof(meta), "%s", format(filename));
+            filename=track_at(index);
+            aster_snprintf(meta,sizeof(meta),"%s",format(filename));
         }
 
-        if ((active == track_id && !is_folder) || finger.control == TRACK_FIRST + row)
-            box(19, y + 2, 422, ROW_H - 5, 10, selected, false);
+        if ((!is_group && !is_folder && track_id==active) ||
+            finger.control==TRACK_FIRST+row)
+            box(19,y+2,422,ROW_H-5,10,selected,false);
         else
-            line(22, y + ROW_H - 2, 438, y + ROW_H - 2, rail);
+            line(22,y+ROW_H-2,438,y+ROW_H-2,rail);
 
-        if (is_folder) {
-            text(33, y + 16, 34, 24, gold, ">", CENTER);
-            text(77, y + 13, 266, 23, ink, filename, LEFT);
+        if (is_folder || is_group) {
+            text(33,y+16,34,24,gold,">",CENTER);
+            text(77,y+(info.artist[0]?7:13),266,23,ink,filename,LEFT);
+            if (info.artist[0])
+                text(79,y+31,260,15,muted,info.artist,LEFT);
         } else {
-            aster_snprintf(temp, sizeof(temp), "%02d", folder_view ? index + 1 : track_id + 1);
-            text(33, y + 18, 45, 18, gold, temp, LEFT);
-            display_name(filename, temp);
-            text(77, y + 13, 260, 24, ink, temp, LEFT);
+            aster_snprintf(temp,sizeof(temp),"%02d",index+1);
+            text(33,y+18,45,18,gold,temp,LEFT);
+            display_name(filename,temp);
+            text(77,y+13,260,24,ink,temp,LEFT);
         }
-        text(351, y + 19, 70, 18, muted, meta, RIGHT);
+        text(351,y+19,70,18,muted,meta,RIGHT);
     }
 
-    if (!visible && !folder_view && !catalog.scanning) {
-        text(26, 200, 408, 19, ink,
-             scan_error < 0 && scan_error != ASTER_ENOENT ? "无法打开存储卡曲库" : "曲库暂无音乐",
+    if (group_type && !hifi_groups_ready()) {
+        if (catalog.scanning)
+            aster_snprintf(temp,sizeof(temp),"等待曲库索引完成...");
+        else if (hifi_groups_busy())
+            aster_snprintf(temp,sizeof(temp),"读取标签 %u / %u",
+                           hifi_groups_processed(),hifi_groups_total());
+        else
+            aster_snprintf(temp,sizeof(temp),"标签分组失败，请重扫索引");
+        text(26,199,408,19,ink,temp,CENTER);
+    } else if (!visible && !folder_view && !group_type && !catalog.scanning) {
+        text(26,200,408,19,ink,
+             scan_error<0 && scan_error!=ASTER_ENOENT?"无法打开存储卡曲库":"曲库暂无音乐",
              CENTER);
-        text(26, 236, 408, 16, muted, "将 MP3、FLAC 或 WAV 放入 music 目录", CENTER);
-    } else if (folder_view && hifi_browser_error()) {
-        text(26, 200, 408, 19, ink, "文件夹列表读取失败", CENTER);
-    } else if (folder_view && hifi_browser_busy() && !visible) {
-        text(26, 200, 408, 19, muted, "正在整理文件夹...", CENTER);
-    } else if (folder_view && !visible) {
-        text(26, 200, 408, 19, muted, "此文件夹没有音乐", CENTER);
-    }
-    uint16_t prev = library_page > 0 ? gold : border;
-    uint16_t next = library_page + 1 < page_count() ? gold : border;
-    box(18, LIBRARY_PAGER + 6, 126, 47, 10, chrome, false);
-    box(316, LIBRARY_PAGER + 6, 126, 47, 10, chrome, false);
-    text(18, LIBRARY_PAGER + 17, 126, 20, prev, "上一页", CENTER);
-    text(316, LIBRARY_PAGER + 17, 126, 20, next, "下一页", CENTER);
+        text(26,236,408,16,muted,"将 MP3、FLAC 或 WAV 放入 music 目录",CENTER);
+    } else if (folder_view && hifi_browser_error())
+        text(26,200,408,19,ink,"文件夹列表读取失败",CENTER);
+    else if (folder_view && hifi_browser_busy() && !visible)
+        text(26,200,408,19,muted,"正在整理文件夹...",CENTER);
+    else if (!visible && library_scanned)
+        text(26,200,408,19,muted,"当前分类没有歌曲",CENTER);
+
+    uint16_t prev=library_page>0?gold:border;
+    uint16_t next=library_page+1<page_count()?gold:border;
+    box(18,LIBRARY_PAGER+6,126,47,10,chrome,false);
+    box(316,LIBRARY_PAGER+6,126,47,10,chrome,false);
+    text(18,LIBRARY_PAGER+17,126,20,prev,"上一页",CENTER);
+    text(316,LIBRARY_PAGER+17,126,20,next,"下一页",CENTER);
     if (folder_view && hifi_browser_busy())
-        aster_snprintf(temp, sizeof(temp), "整理 %d", visible);
+        aster_snprintf(temp,sizeof(temp),"整理 %d",visible);
     else
-        aster_snprintf(temp, sizeof(temp), "%d / %d", library_page + 1, page_count());
-    text(158, LIBRARY_PAGER + 17, 144, 20, ink, temp, CENTER);
+        aster_snprintf(temp,sizeof(temp),"%d / %d",library_page+1,page_count());
+    text(158,LIBRARY_PAGER+17,144,20,ink,temp,CENTER);
 }
 
 static void draw(uint32_t now)
@@ -1544,8 +1600,15 @@ static int hit(int x, int y)
         x >= 378 && x < DESIGN)
         return BACK;
     if (page == LIBRARY) {
-        if (y >= HEADER_END && y < ROW_TOP)
-            return x < 230 ? LIB_ALL : LIB_FOLDERS;
+        if (y>=4 && y<HEADER_END && x>=270 && x<376)
+            return LIB_RESCAN;
+        if (y>=HEADER_END && y<ROW_TOP) {
+            if (x<10 || x>=450)return NONE;
+            static const int scope_ids[5]={
+                LIB_ALL,LIB_ARTISTS,LIB_ALBUMS,LIB_DECADES,LIB_FOLDERS
+            };
+            return scope_ids[(x-10)/88];
+        }
         if (y >= ROW_TOP && y < LIBRARY_PAGER && x >= 8 && x < DESIGN - 8)
             return TRACK_FIRST + (y - ROW_TOP) / ROW_H;
         if (y >= LIBRARY_PAGER && y < CONTENT_END && x >= 0 && x < 150)
@@ -1700,21 +1763,44 @@ static void activate(int id)
         if (page == LIBRARY && library_mode == LIBRARY_FOLDER_TREE &&
             hifi_browser_folder()[0]) {
             hifi_browser_up();
-            library_page = 0;
+            library_page=0;
+        } else if (page == LIBRARY && library_detail_group >= 0) {
+            library_detail_group=-1;
+            library_page=0;
         } else
             set_page(PLAYBACK);
         break;
     case LIB_ALL:
-        library_mode = LIBRARY_ALL_TRACKS;
-        library_page = 0;
-        break;
-    case LIB_FOLDERS:
-        if (library_mode != LIBRARY_FOLDER_TREE) {
-            library_mode = LIBRARY_FOLDER_TREE;
-            hifi_browser_open("");
-            library_page = 0;
+    case LIB_ARTISTS:
+    case LIB_ALBUMS:
+    case LIB_DECADES:
+    case LIB_FOLDERS: {
+        enum library_mode target=id==LIB_ALL?LIBRARY_ALL_TRACKS:
+                    id==LIB_ARTISTS?LIBRARY_ARTISTS:
+                    id==LIB_ALBUMS?LIBRARY_ALBUMS:
+                    id==LIB_DECADES?LIBRARY_DECADES:LIBRARY_FOLDER_TREE;
+        if (library_mode != target) {
+            library_mode=target;
+            library_detail_group=-1;
+            library_page=0;
+            if (target==LIBRARY_FOLDER_TREE)hifi_browser_open("");
         }
         break;
+    }
+    case LIB_RESCAN: {
+        uint32_t now=aster_time_now_ms();
+        if (!rescan_armed || (int32_t)(now-rescan_deadline)>=0) {
+            rescan_armed=true;
+            rescan_deadline=now+4000;
+            notice("4 秒内再点一次，确认完整重扫");
+        } else {
+            rescan_armed=false;
+            hifi_catalog_drop_snapshots();
+            scan_start();
+            notice("已清除旧索引，正在完整重扫");
+        }
+        break;
+    }
     case DEMO:
         queue_track("/assets/audio/demo.flac");
         break;
@@ -1766,9 +1852,23 @@ static void activate(int id)
     default:
         if (id >= TRACK_FIRST && id < TRACK_FIRST + ROWS) {
             int position = library_page * ROWS + id - TRACK_FIRST;
+            int type=library_group_mode();
             if (library_mode == LIBRARY_ALL_TRACKS)
                 play_index(position);
-            else {
+            else if (type) {
+                if (!hifi_groups_ready()) {
+                    notice("正在读取音乐标签");
+                } else if (library_detail_group < 0) {
+                    if (hifi_groups_select(type,(uint32_t)position)) {
+                        library_detail_group=position;
+                        library_page=0;
+                    }
+                } else {
+                    uint32_t track_id=0;
+                    if (hifi_groups_selection_track((uint32_t)position,&track_id))
+                        play_index((int)track_id);
+                }
+            } else {
                 hifi_browser_entry_t entry = {0};
                 if (!hifi_browser_entry((uint32_t)position, &entry)) break;
                 if (!entry.folder) {
@@ -1994,6 +2094,19 @@ ASTER_APP_EXPORT void aster_app_event(const aster_event_t *event)
         poll(now);
         shake_poll(now);
         scan_tick();
+        uint32_t meta_before=hifi_groups_processed();
+        bool meta_was_ready=hifi_groups_ready();
+        hifi_groups_tick(player.state==ASTER_PLAYER_PLAYING);
+        if (page==LIBRARY && library_group_mode() &&
+            (hifi_groups_ready()!=meta_was_ready ||
+             hifi_groups_processed()/8u!=meta_before/8u)) {
+            library_page=clamp(library_page,0,page_count()-1);
+            dirty=true;
+        }
+        if (rescan_armed && (int32_t)(now-rescan_deadline)>=0) {
+            rescan_armed=false;
+            if (page==LIBRARY)dirty=true;
+        }
         lyrics_tick(now);
         paper_tick(now);
         if (cover_tick(DESIGN) && page == PLAYBACK) {
