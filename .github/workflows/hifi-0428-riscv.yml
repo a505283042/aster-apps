@@ -1,8 +1,9 @@
-name: HiFiPlayer 0.4.28 RISC-V AOT
+name: HiFiPlayer 0.4.29 RISC-V AOT
 on:
   push:
     branches:
       - fix/hifi-unlimited-autoplay
+      - feat/hifi-fullscreen-cover-controls
   workflow_dispatch:
 
 permissions:
@@ -58,7 +59,7 @@ jobs:
             -o /tmp/hifi-library-scan-test
           /tmp/hifi-library-scan-test
 
-      - name: Build AOT APP 0.4.28
+      - name: Build AOT APP 0.4.29
         run: |
           python3 aster-sdk/tools/aster.py build "$GITHUB_WORKSPACE/HiFiPlayer" --target riscv --aot
           test -s HiFiPlayer/dist/riscv/aster.hifi.ast
@@ -71,7 +72,7 @@ jobs:
       - name: Upload installable .ast
         uses: actions/upload-artifact@v4
         with:
-          name: Aster-HiFiPlayer-0.4.28-riscv
+          name: Aster-HiFiPlayer-0.4.29-riscv
           path: HiFiPlayer/dist/riscv/aster.hifi.ast
           if-no-files-found: error
           retention-days: 14
