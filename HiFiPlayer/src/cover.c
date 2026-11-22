@@ -6,12 +6,14 @@ enum { MAX_EMBEDDED = 4 * 1024 * 1024 };
 
 static const char scratch[] = "/cache/hifi-cover.img";
 static uint16_t pixels[COVER_EDGE * COVER_EDGE];
+/* Cache both variants; a tap never triggers JPEG decoding or a full-screen alpha blend. */
+static uint16_t dim_pixels[COVER_EDGE * COVER_EDGE];
 static _Alignas(8) uint8_t chunk[COVER_WORK_BYTES];
 static uint32_t image_w, image_h, remaining;
 static uint16_t tint;
 static aster_handle_t input, output;
 static char track_path[256];
-enum cover_phase { IDLE, SIDECAR, EXTERNAL, EMBEDDED, COPY, DECODE_COPY, JPEG };
+enum cover_phase { IDLE, SIDECAR, EXTERNAL, EMBEDDED, COPY, DECODE_COPY, JPEG, DEFAULT };
 static enum cover_phase phase, jpeg_fallback;
 static unsigned extension_index;
 static uint32_t remote_revision;
@@ -227,7 +229,7 @@ static void begin_jpeg(uint32_t offset, uint32_t length, unsigned cap, enum cove
 
 static void begin_embedded(unsigned cap)
 {
-    phase = IDLE;
+    phase = DEFAULT;
     aster_stat_t st = {.size = sizeof(st), .version = 1};
     uint32_t n = strlen(track_path);
     if (aster_fs_stat(track_path, n, &st, sizeof(st)) < 0 || st.filesize < 12 ||
@@ -245,7 +247,7 @@ static void begin_embedded(unsigned cap)
             wave(size, &picture);
     }
     if (picture.jpeg) {
-        begin_jpeg(picture.offset, picture.length, cap, IDLE);
+        begin_jpeg(picture.offset, picture.length, cap, DEFAULT);
         return;
     }
     if (picture.length && aster_fs_seek(input, picture.offset, ASTER_FS_SEEK_SET) >= 0) {
@@ -276,6 +278,13 @@ static bool finish_image(uint32_t w, uint32_t h)
         }
     }
     tint = (r / count) << 11 | (g / count) << 5 | b / count;
+    /* Approximate the original S31 150/255 black overlay once per new album. */
+    for (unsigned i = 0, total = image_w * image_h; i < total; i++) {
+        uint16_t color = pixels[i];
+        dim_pixels[i] = (uint16_t)((((color >> 11) * 105 / 255) << 11) |
+                                   ((((color >> 5) & 63) * 105 / 255) << 5) |
+                                   ((color & 31) * 105 / 255));
+    }
     aster_printf("HiFi cover %ux%u\n", image_w, image_h);
     return true;
 }
@@ -345,7 +354,7 @@ void cover_select(const char *track)
     aster_snprintf(track_path, sizeof(track_path), "%s", track);
     image_w = image_h = 0;
     extension_index = 0;
-    phase = !*track ? IDLE : !strcmp(track, "/assets/audio/demo.flac") ? EXTERNAL : SIDECAR;
+    phase = !*track ? DEFAULT : !strcmp(track, "/assets/audio/demo.flac") ? EXTERNAL : SIDECAR;
 }
 
 void cover_select_remote(const char *path, uint32_t revision)
@@ -372,7 +381,11 @@ bool cover_tick(unsigned cap)
     if (phase == SIDECAR)
         return sidecar(cap);
     if (phase == EXTERNAL)
-        return open_image(remote_revision ? track_path : "/assets/art/moonlight.bmp", cap, IDLE);
+        return open_image(remote_revision ? track_path : "/assets/art/moonlight.bmp", cap, DEFAULT);
+    if (phase == DEFAULT) {
+        phase = IDLE;
+        return decode_native("/assets/art/moonlight.bmp", cap);
+    }
     if (phase == EMBEDDED) {
         begin_embedded(cap);
         return false;
@@ -390,6 +403,8 @@ bool cover_tick(unsigned cap)
         phase = IDLE;
         bool ok = decode_native(scratch, cap);
         aster_fs_unlink(scratch, sizeof(scratch) - 1);
+        if (!ok)
+            phase = DEFAULT;
         return ok;
     }
     if (phase != COPY)
@@ -432,53 +447,41 @@ uint16_t cover_mix(uint16_t base, uint16_t color, unsigned weight)
     return (r << 11) | (g << 5) | b;
 }
 
+/* Fill the 460x460 square directly. Both views use the same decoded image,
+ * center-cropped to cover the display (rather than the old 208px inset).
+ * Selection of the dim variant is a pointer switch, not a new decode. */
 bool cover_paint(aster_handle_t surface, unsigned left, unsigned top, unsigned edge, uint16_t base,
-                 uint16_t accent)
+                 bool dimmed)
 {
-    if (!cover_ready())
+    if (!cover_ready() || !edge)
         return false;
     aster_surface_buffer_t buf = {.size = sizeof(buf), .version = 1};
     if (aster_surface_acquire(surface, &buf, sizeof(buf)) < 0 || !buf.ptr ||
         buf.format != ASTER_PIXEL_RGB565 || left + edge > buf.width || top + edge > buf.height)
         return false;
-    unsigned pitch = buf.pitch / sizeof(uint16_t);
-    unsigned ambient_h = edge * 225 / 460;
-    unsigned max_dimension = image_w > image_h ? image_w : image_h;
-    unsigned h = image_h * edge * 208 / 460 / max_dimension;
-    unsigned w = image_w * edge * 208 / 460 / max_dimension;
-    if (!w)
-        w = 1;
-    if (!h)
-        h = 1;
-    unsigned ax = left + (edge - w) / 2, ay = top + (ambient_h - h) / 2;
+
     uint16_t *dest = buf.ptr;
-    uint16_t glow = cover_mix(cover_mix(base, accent, 75), tint, 44);
-    uint16_t *base_row = dest + (top + ambient_h) * pitch;
-    for (unsigned x = 0; x < buf.width; x++)
-        base_row[x] = base;
+    unsigned pitch = buf.pitch / sizeof(uint16_t);
+    const uint16_t *art = dimmed ? dim_pixels : pixels;
+    unsigned crop = image_w < image_h ? image_w : image_h;
+    unsigned x_crop = (image_w - crop) / 2;
+    unsigned y_crop = (image_h - crop) / 2;
+
     for (unsigned y = 0; y < buf.height; y++) {
         uint16_t *row = dest + y * pitch;
-        if (y < top || y >= top + ambient_h) {
-            if (row != base_row)
-                memcpy(row, base_row, buf.width * sizeof(*row));
+        if (y < top || y >= top + edge) {
+            for (unsigned x = 0; x < buf.width; x++)
+                row[x] = base;
             continue;
         }
-        unsigned depth = top + ambient_h - y;
-        uint16_t edge_tone = cover_mix(base, glow, 1 + depth * 113 / ambient_h);
-        uint16_t center_tone = cover_mix(base, glow, 1 + depth * 179 / ambient_h);
+        unsigned source_y = y_crop + (y - top) * crop / edge;
+        const uint16_t *source_row = art + source_y * image_w;
         for (unsigned x = 0; x < buf.width; x++) {
-            unsigned offset = x < left ? edge : x - left;
-            unsigned distance = offset < edge / 2 ? offset : offset < edge ? edge - offset : 0;
-            row[x] = cover_mix(edge_tone, center_tone, distance * 512 / edge);
+            if (x < left || x >= left + edge)
+                row[x] = base;
+            else
+                row[x] = source_row[x_crop + (x - left) * crop / edge];
         }
-        if (y < ay || y >= ay + h)
-            continue;
-        const uint16_t *src = pixels + (y - ay) * image_h / h * image_w;
-        if (w == image_w)
-            memcpy(row + ax, src, w * sizeof(*src));
-        else
-            for (unsigned x = 0; x < w; x++)
-                row[ax + x] = src[x * image_w / w];
     }
     return true;
 }
