@@ -23,6 +23,8 @@ void hifi_catalog_close(void);
 hifi_catalog_status_t hifi_catalog_status(void);
 /* Returns the relative UTF-8 path below /music, including nested directories. */
 bool hifi_catalog_path_at(uint32_t index, char *out, unsigned capacity);
-/* Slow path, for restoring a previously selected track; do not call per frame. */
+/* Active snapshot hashes are rebuilt in small slices after startup. */
+bool hifi_catalog_lookup_ready(void);
+/* O(n) in 4-byte hashes, with an SD read only for rare hash matches. */
 int32_t hifi_catalog_find(const char *relative_path);
 #endif
