@@ -53,6 +53,7 @@ static unsigned emit_cp(char *dst, unsigned used, unsigned cap, uint32_t cp)
         if (needed == 2) dst[used++] = (char)(0xc0u | (cp >> 6));
         else if (needed == 3) dst[used++] = (char)(0xe0u | (cp >> 12));
         else dst[used++] = (char)(0xf0u | (cp >> 18));
+        if (needed == 4) dst[used++] = (char)(0x80u | ((cp >> 12) & 63u));
         if (needed >= 3) dst[used++] = (char)(0x80u | ((cp >> 6) & 63u));
         dst[used++] = (char)(0x80u | (cp & 63u));
     }
