@@ -10,6 +10,10 @@ static uint8_t row_count[ROWS];
  * needs only the packets for the new lyric. */
 static uint8_t index_bytes[2][8192 * ENTRY];
 static uint16_t cached_count[2];
+/* Source-aware lookup: a cached index from an old packaged asset must not be
+ * used with a different shared font revision or fallback source. */
+static uint8_t cached_source[2];
+static bool missing_logged[2];
 
 static uint16_t le16(const uint8_t *p) { return (uint16_t)p[0] | (uint16_t)p[1] << 8; }
 
@@ -27,32 +31,87 @@ static bool read_all(aster_handle_t handle, uint8_t *out, size_t bytes)
     return true;
 }
 
+/* The shared ALV1 fonts are installed once on the SD card through USB MSC.
+ * Aster FS resolves /sd to the SD root only for apps with the 'sd' permission.
+ * Old fat APP bundles still work as a safe fallback during migration. */
 bool paper_font_open(paper_font_t *font, bool bold)
 {
-    static const char regular[] = "/assets/text/paper-serif.bin";
-    static const char strong[] = "/assets/text/paper-bold.bin";
-    const char *path = bold ? strong : regular;
-    if (aster_fs_open(path, strlen(path), ASTER_FS_O_RDONLY, &font->handle) < 0)
-        return false;
-    if (!cached_count[bold]) {
-        uint8_t header[HEADER];
-        if (!read_all(font->handle, header, sizeof(header)) || memcmp(header, "ALV1", 4) ||
-            le16(header + 4) != PAPER_FONT_CELL) {
-            paper_font_close(font);
-            return false;
-        }
-        uint16_t count = le16(header + 6);
-        size_t bytes = (size_t)count * ENTRY;
-        if (!count || bytes > sizeof(index_bytes[bold]) ||
-            !read_all(font->handle, index_bytes[bold], bytes)) {
-            paper_font_close(font);
-            return false;
-        }
-        cached_count[bold] = count;
-    }
-    font->count = cached_count[bold];
+    static const char *const shared[2] = {
+        "/sd/aster/shared/hifi/fonts/paper-serif.bin",
+        "/sd/aster/shared/hifi/fonts/paper-bold.bin"
+    };
+    static const char *const embedded[2] = {
+        "/assets/text/paper-serif.bin",
+        "/assets/text/paper-bold.bin"
+    };
+    const unsigned variant = bold ? 1u : 0u;
+    font->handle = 0;
+    font->count = 0;
     font->bold = bold;
-    return true;
+    for (unsigned source = 1u; source <= 2u; source++) {
+        const char *path = source == 1u ? shared[variant] : embedded[variant];
+        unsigned n = (unsigned)strlen(path);
+        aster_stat_t st = {.size = sizeof(st), .version = 1};
+        if (aster_fs_stat(path, n, &st, sizeof(st)) < 0 ||
+            (st.mode & ASTER_STAT_DIR) || st.filesize < HEADER + ENTRY)
+            continue;
+        aster_handle_t handle = 0;
+        if (aster_fs_open(path, n, ASTER_FS_O_RDONLY, &handle) < 0)
+            continue;
+        uint8_t header[HEADER];
+        bool valid = read_all(handle, header, sizeof(header)) &&
+                     !memcmp(header, "ALV1", 4) &&
+                     le16(header + 4) == PAPER_FONT_CELL;
+        uint16_t count = valid ? le16(header + 6) : 0;
+        uint32_t index_bytes_n = (uint32_t)count * ENTRY;
+        valid = count > 0 && index_bytes_n <= sizeof(index_bytes[variant]) &&
+                st.filesize >= (uint64_t)HEADER + index_bytes_n;
+        if (valid && (cached_source[variant] != source ||
+                      cached_count[variant] != count)) {
+            /* A new source is validated before its glyph offsets can be used.
+             * Packet contents are read on demand, never loaded as a 2.5MB blob. */
+            cached_source[variant] = 0;
+            cached_count[variant] = 0;
+            valid = read_all(handle, index_bytes[variant], index_bytes_n);
+            const uint64_t packet_bytes =
+                st.filesize - (uint64_t)HEADER - index_bytes_n;
+            uint32_t previous_cp = 0;
+            uint32_t previous_offset = 0;
+            for (uint32_t i = 0; valid && i < count; ++i) {
+                const uint8_t *entry = index_bytes[variant] + i * ENTRY;
+                uint32_t cp = le16(entry);
+                uint32_t length = le16(entry + 2);
+                uint32_t offset = le32(entry + 4);
+                if (!cp || (i && cp <= previous_cp) || !length ||
+                    offset < previous_offset ||
+                    (uint64_t)offset + length > packet_bytes)
+                    valid = false;
+                previous_cp = cp;
+                previous_offset = offset;
+            }
+            if (valid) {
+                cached_source[variant] = (uint8_t)source;
+                cached_count[variant] = count;
+            }
+        } else if (valid) {
+            /* File header matches the index already loaded for this source.
+             * The shared file cannot be edited while the device holds the card. */
+            valid = true;
+        }
+        if (valid) {
+            font->handle = handle;
+            font->count = count;
+            missing_logged[variant] = false;
+            return true;
+        }
+        aster_fs_close(handle);
+    }
+    if (!missing_logged[variant]) {
+        aster_printf("HiFi paper font unavailable: %s; copy from APP source text/ to SD /aster/shared/hifi/fonts/",
+                     bold ? "paper-bold.bin" : "paper-serif.bin");
+        missing_logged[variant] = true;
+    }
+    return false;
 }
 
 void paper_font_close(paper_font_t *font)
