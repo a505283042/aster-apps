@@ -17,6 +17,8 @@ enum control {
     PREVIOUS,
     TOGGLE,
     NEXT,
+    PLAY_MODE,
+    PLAY_LOOP,
     DEMO,
     PAGE_PREV,
     PAGE_NEXT,
@@ -36,23 +38,21 @@ enum {
     ROW_TOP = 108,
     ROW_H = 57,
     LIBRARY_PAGER = ROW_TOP + ROWS * ROW_H,
-    VOLUME_X = 76,
-    VOLUME_W = 161,
-    VOLUME_Y = 316,
-    PLAY_SEEK_X = 27,
-    PLAY_SEEK_W = 209,
-    PLAY_PROGRESS = 415,
-    PANEL_X = 254,
-    PANEL_Y = 301,
-    PANEL_W = 184,
-    PANEL_H = 140,
-    STEP_X = PANEL_X + 8,
-    STEP_W = 58,
-    STEP_UP = PANEL_Y + 8,
-    STEP_DOWN = PANEL_Y + 74,
-    STEP_H = 58,
-    TOGGLE_X = PANEL_X + 74,
-    TOGGLE_W = 102
+    PLAY_SEEK_X = 29,
+    PLAY_SEEK_W = 402,
+    PLAY_PROGRESS = 357,
+    CTRL_Y = 397,
+    CTRL_H = 59,
+    MODE_X = 17,
+    MODE_W = 63,
+    PREV_X = 99,
+    PREV_W = 64,
+    TOGGLE_X = 192,
+    TOGGLE_W = 76,
+    NEXT_X = 297,
+    NEXT_W = 65,
+    LOOP_X = 380,
+    LOOP_W = 63
 };
 
 #define RGB(r, g, b) ((uint16_t)(((r) & 0xf8) << 8 | ((g) & 0xfc) << 3 | (b) >> 3))
@@ -852,65 +852,102 @@ static void playback_slider(int x, int y, int w, int fill, uint16_t track, uint1
         circle(x + fill, y + 2, 6, accent);
 }
 
+/* Small vector icons; no external font, glyph file or extra image buffer. */
+static void draw_shuffle_icon(int cx, int cy, uint16_t color)
+{
+    line(cx - 17, cy - 11, cx - 8, cy - 11, color);
+    line(cx - 8, cy - 11, cx + 8, cy + 10, color);
+    line(cx + 8, cy + 10, cx + 14, cy + 10, color);
+    triangle(cx + 17, cy + 10, cx + 9, cy + 5, cx + 9, cy + 15, color);
+    line(cx - 17, cy + 11, cx - 8, cy + 11, color);
+    line(cx - 8, cy + 11, cx + 8, cy - 10, color);
+    line(cx + 8, cy - 10, cx + 14, cy - 10, color);
+    triangle(cx + 17, cy - 10, cx + 9, cy - 15, cx + 9, cy - 5, color);
+}
+
+static void draw_repeat_icon(int cx, int cy, uint16_t color)
+{
+    line(cx - 16, cy - 10, cx + 13, cy - 10, color);
+    triangle(cx + 17, cy - 10, cx + 9, cy - 15, cx + 9, cy - 5, color);
+    line(cx + 17, cy - 6, cx + 17, cy + 3, color);
+    line(cx + 16, cy + 10, cx - 13, cy + 10, color);
+    triangle(cx - 17, cy + 10, cx - 9, cy + 5, cx - 9, cy + 15, color);
+    line(cx - 17, cy + 6, cx - 17, cy - 3, color);
+}
+
+static void draw_transport_icon(int cx, int cy, bool backwards, uint16_t color)
+{
+    int sign = backwards ? -1 : 1;
+    triangle(cx - sign * 11, cy - 13, cx + sign * 9, cy,
+             cx - sign * 11, cy + 13, color);
+    box(cx + sign * 11 - 2, cy - 13, 4, 26, 1, color, false);
+}
+
 static void playback(void)
 {
     char name[256], parameters[48];
-    uint16_t base = RGB(14, 26, 40), accent = RGB(157, 218, 248);
-    uint16_t tray = RGB(24, 43, 63);
-    uint16_t key = cover_mix(base, accent, 34), track = cover_mix(base, accent, 67);
-    uint16_t subtitle = cover_mix(ink, base, 58);
+    uint16_t base = RGB(10, 19, 31), accent = RGB(163, 221, 249);
+    uint16_t subtitle = RGB(195, 207, 218);
+    uint16_t subdued = RGB(138, 161, 179);
+    uint16_t track = RGB(73, 93, 111);
     if (cover_paint(surface, left, top, content_w, base, accent))
         aster_ge_touch(&gfx, 0, 0, width, height);
     else
         fallback_art(base);
-    text(25, 224, 235, 32, ink, title(name), LEFT);
-    const char *by = artist();
-    text(27, 266, 270, 16, subtitle, *by ? by : source_label(), LEFT);
 
+    text(27, 20, 190, 17, ink, "ASTER MUSIC", LEFT);
     if (player.rate) {
         const char *codec = bluetooth_input() ? "SBC" : format(player.path);
         if (*codec)
-            aster_snprintf(parameters, sizeof(parameters), "%s/%uHz/%ubit", codec, player.rate,
-                           player.bits);
+            aster_snprintf(parameters, sizeof(parameters), "%s / %uHz / %ubit", codec,
+                           player.rate, player.bits);
         else
-            aster_snprintf(parameters, sizeof(parameters), "%uHz/%ubit", player.rate, player.bits);
-        text(264, 234, 171, 14, subtitle, parameters, RIGHT);
+            aster_snprintf(parameters, sizeof(parameters), "%uHz / %ubit", player.rate,
+                           player.bits);
+        text(216, 22, 170, 13, subtitle, parameters, RIGHT);
     } else
-        text(264, 233, 171, 16, subtitle, playback_state(), RIGHT);
-    line(26, 291, 435, 291, track);
-    text(27, VOLUME_Y - 8, 47, 14, subtitle, "音量", LEFT);
-    playback_slider(VOLUME_X, VOLUME_Y, VOLUME_W, volume * VOLUME_W / 100, track, accent, true);
+        text(210, 22, 176, 14, subtitle, playback_state(), RIGHT);
+
+    text(25, 255, 410, 34, ink, title(name), CENTER);
+    const char *by = artist();
+    text(27, 300, 406, 20, subtitle, *by ? by : source_label(), CENTER);
 
     char stamp[24];
     uint32_t pos = position();
     if (player.duration_ms && pos > player.duration_ms)
         pos = player.duration_ms;
+    int fill = player.duration_ms ? (uint64_t)pos * PLAY_SEEK_W / player.duration_ms : 0;
+    playback_slider(PLAY_SEEK_X, PLAY_PROGRESS, PLAY_SEEK_W, fill, track, accent, can_seek());
     clock_text(stamp, pos);
-    text(25, 348, 153, 48, seeking != SEEK_IDLE ? accent : ink,
+    text(29, 370, 132, 17, seeking != SEEK_IDLE ? accent : ink,
          has_position() ? stamp : "--:--", LEFT);
     if (player.duration_ms)
         clock_text(stamp, player.duration_ms);
-    text(177, 376, 60, 14, subtitle, player.duration_ms ? stamp : "--:--", RIGHT);
-    int fill = player.duration_ms ? (uint64_t)pos * PLAY_SEEK_W / player.duration_ms : 0;
-    playback_slider(PLAY_SEEK_X, PLAY_PROGRESS, PLAY_SEEK_W, fill, track, accent, can_seek());
+    text(298, 370, 132, 17, subtitle, player.duration_ms ? stamp : "--:--", RIGHT);
 
-    box(PANEL_X, PANEL_Y, PANEL_W, PANEL_H, 19, tray, false);
-    box(STEP_X, STEP_UP, STEP_W, STEP_H, 12, finger.control == PREVIOUS ? track : key, false);
-    box(STEP_X, STEP_DOWN, STEP_W, STEP_H, 12, finger.control == NEXT ? track : key, false);
-    box(TOGGLE_X, STEP_UP, TOGGLE_W, STEP_DOWN + STEP_H - STEP_UP, 15,
-        finger.control == TOGGLE ? ink : accent, false);
-    int cx = STEP_X + STEP_W / 2, prev_y = STEP_UP + STEP_H / 2, next_y = STEP_DOWN + STEP_H / 2;
-    box(cx - 12, prev_y - 10, 3, 20, 1, ink, false);
-    triangle(cx - 6, prev_y, cx + 11, prev_y - 10, cx + 11, prev_y + 10, ink);
-    triangle(cx - 11, next_y - 10, cx + 6, next_y, cx - 11, next_y + 10, ink);
-    box(cx + 9, next_y - 10, 3, 20, 1, ink, false);
-    cx = TOGGLE_X + TOGGLE_W / 2;
-    int cy = PANEL_Y + PANEL_H / 2;
+    /* Mode buttons are visible but disabled until system-side background
+     * shuffle/repeat support exists. Do not imply they are active. */
+    if (finger.control == PLAY_MODE)
+        box(MODE_X, CTRL_Y, MODE_W, CTRL_H, 12, RGB(38, 60, 78), false);
+    if (finger.control == PLAY_LOOP)
+        box(LOOP_X, CTRL_Y, LOOP_W, CTRL_H, 12, RGB(38, 60, 78), false);
+    draw_shuffle_icon(MODE_X + MODE_W / 2, CTRL_Y + 23, subdued);
+    draw_repeat_icon(LOOP_X + LOOP_W / 2, CTRL_Y + 23, subdued);
+    text(MODE_X, CTRL_Y + 44, MODE_W, 12, subdued, "随机", CENTER);
+    text(LOOP_X, CTRL_Y + 44, LOOP_W, 12, subdued, "循环", CENTER);
+
+    uint16_t left_key = finger.control == PREVIOUS ? accent : ink;
+    uint16_t right_key = finger.control == NEXT ? accent : ink;
+    draw_transport_icon(PREV_X + PREV_W / 2, CTRL_Y + 27, true, left_key);
+    draw_transport_icon(NEXT_X + NEXT_W / 2, CTRL_Y + 27, false, right_key);
+    uint16_t button = finger.control == TOGGLE ? ink : accent;
+    int cx = TOGGLE_X + TOGGLE_W / 2, cy = CTRL_Y + CTRL_H / 2;
+    circle(cx, cy, 32, button);
     if (player.state == ASTER_PLAYER_PLAYING) {
-        box(cx - 10, cy - 15, 7, 30, 2, base, false);
-        box(cx + 3, cy - 15, 7, 30, 2, base, false);
+        box(cx - 10, cy - 13, 7, 26, 2, base, false);
+        box(cx + 3, cy - 13, 7, 26, 2, base, false);
     } else
-        triangle(cx - 9, cy - 16, cx + 15, cy, cx - 9, cy + 16, base);
+        triangle(cx - 8, cy - 15, cx + 15, cy, cx - 8, cy + 15, base);
 }
 
 static int next_lyric_group(int first)
@@ -1384,20 +1421,21 @@ static int hit(int x, int y)
     if (page == LYRICS && can_seek() && y >= LYRIC_SEEK_TOP && y < CONTENT_END)
         return SEEK;
     if (page == PLAYBACK) {
-        if (x >= 19 && x < PANEL_X - 7) {
-            if (y >= VOLUME_Y - 20 && y < VOLUME_Y + 20)
-                return VOLUME;
-            if (can_seek() && y >= PLAY_PROGRESS - 25 && y < PLAY_PROGRESS + 25)
-                return SEEK;
-        }
-        if (x >= STEP_X && x < STEP_X + STEP_W) {
-            if (y >= STEP_UP && y < STEP_UP + STEP_H)
+        if (can_seek() && y >= PLAY_PROGRESS - 17 && y < PLAY_PROGRESS + 35 &&
+            x >= PLAY_SEEK_X - 12 && x < PLAY_SEEK_X + PLAY_SEEK_W + 12)
+            return SEEK;
+        if (y >= CTRL_Y && y < CTRL_Y + CTRL_H) {
+            if (x >= MODE_X && x < MODE_X + MODE_W)
+                return PLAY_MODE;
+            if (x >= PREV_X && x < PREV_X + PREV_W)
                 return PREVIOUS;
-            if (y >= STEP_DOWN && y < STEP_DOWN + STEP_H)
+            if (x >= TOGGLE_X && x < TOGGLE_X + TOGGLE_W)
+                return TOGGLE;
+            if (x >= NEXT_X && x < NEXT_X + NEXT_W)
                 return NEXT;
+            if (x >= LOOP_X && x < LOOP_X + LOOP_W)
+                return PLAY_LOOP;
         }
-        if (x >= TOGGLE_X && x < TOGGLE_X + TOGGLE_W && y >= STEP_UP && y < STEP_DOWN + STEP_H)
-            return TOGGLE;
     }
     return NONE;
 }
@@ -1407,7 +1445,7 @@ static bool page_swipe_area(int y)
     if (page == PAPER)
         return y >= 24 && y < DESIGN - 24;
     if (page == PLAYBACK)
-        return y >= 24 && y < PANEL_Y - 5;
+        return y >= HEADER_END && y < PLAY_PROGRESS - 24;
     return y >= HEADER_END && y < (page == LYRICS ? LYRIC_SEEK_TOP : LIBRARY_PAGER);
 }
 
@@ -1527,6 +1565,10 @@ static void activate(int id)
         break;
     case PAGE_NEXT:
         change_library_page(1);
+        break;
+    case PLAY_MODE:
+    case PLAY_LOOP:
+        notice("播放模式将在后续版本启用");
         break;
     case TOGGLE:
         if (!bluetooth_input() && !media_in_use()) {
@@ -1743,7 +1785,9 @@ ASTER_APP_EXPORT void aster_app_event(const aster_event_t *event)
         scan_tick();
         lyrics_tick(now);
         paper_tick(now);
-        if (cover_tick(sx(208)) && page == PLAYBACK)
+        /* PNG/BMP normalization temporarily reuses the APP surface. Repaint
+         * even if the user was on lyrics while the cover finished loading. */
+        if (cover_tick(surface, sx(460)))
             dirty = true;
         uint32_t second = position() / 1000;
         if (visible_second != second) {
