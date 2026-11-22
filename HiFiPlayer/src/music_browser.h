@@ -27,6 +27,8 @@ typedef struct {
 } hifi_browser_progress_t;
 
 void hifi_browser_start(void);
+/* Close pending HFD1 I/O before app stop or USB MSC handoff. */
+void hifi_browser_close(void);
 void hifi_browser_tick(void);
 void hifi_browser_open(const char *relative_folder);
 bool hifi_browser_enter_folder(uint32_t folder_id);
