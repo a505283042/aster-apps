@@ -5,9 +5,11 @@
 enum { MAX_EMBEDDED = 4 * 1024 * 1024 };
 
 static const char scratch[] = "/cache/hifi-cover.img";
+/* The visible pair is never touched by an in-flight JPEG or image decode.
+ * Switch tracks atomically only after the new image is completely ready. */
 static uint16_t pixels[COVER_EDGE * COVER_EDGE];
-/* Cache both variants; a tap never triggers JPEG decoding or a full-screen alpha blend. */
 static uint16_t dim_pixels[COVER_EDGE * COVER_EDGE];
+static uint16_t staging_pixels[COVER_EDGE * COVER_EDGE];
 static _Alignas(8) uint8_t chunk[COVER_WORK_BYTES];
 static uint32_t image_w, image_h, remaining;
 static aster_handle_t input, output;
@@ -218,7 +220,7 @@ static void close_files(void)
 
 static void begin_jpeg(uint32_t offset, uint32_t length, unsigned cap, enum cover_phase fallback)
 {
-    if (cover_jpeg_begin(input, offset, length, cap, pixels, chunk)) {
+    if (cover_jpeg_begin(input, offset, length, cap, staging_pixels, chunk)) {
         jpeg_fallback = fallback;
         phase = JPEG;
     } else {
@@ -264,17 +266,21 @@ static void begin_embedded(unsigned cap)
 
 static bool finish_image(uint32_t w, uint32_t h)
 {
-    image_w = w;
-    image_h = h;
-    phase = IDLE;
-    /* Approximate the original S31 150/255 black overlay once per new album. */
-    for (unsigned i = 0, total = image_w * image_h; i < total; i++) {
+    /* No intermediate default frame: decode first, swap completed cover once. */
+    unsigned total = w * h;
+    if (!w || !h || w > COVER_EDGE || h > COVER_EDGE)
+        return false;
+    memcpy(pixels, staging_pixels, total * sizeof(uint16_t));
+    for (unsigned i = 0; i < total; i++) {
         uint16_t color = pixels[i];
         dim_pixels[i] = (uint16_t)((((color >> 11) * 105 / 255) << 11) |
                                    ((((color >> 5) & 63) * 105 / 255) << 5) |
                                    ((color & 31) * 105 / 255));
     }
-    aster_printf("HiFi cover %ux%u\n", image_w, image_h);
+    image_w = w;
+    image_h = h;
+    phase = IDLE;
+    aster_printf("HiFi cover swap %ux%u\n", image_w, image_h);
     return true;
 }
 
@@ -282,8 +288,8 @@ static bool decode_native(const char *path, unsigned cap)
 {
     aster_img_render_args_t args = {.size = sizeof(args),
                                     .version = 1,
-                                    .dst_off = (uint32_t)(uintptr_t)pixels,
-                                    .dst_span = sizeof(pixels),
+                                    .dst_off = (uint32_t)(uintptr_t)staging_pixels,
+                                    .dst_span = sizeof(staging_pixels),
                                     .cap_w = cap,
                                     .cap_h = cap};
     if (aster_img_render(path, strlen(path), &args, sizeof(args)) < 0 || !args.out_w ||
@@ -342,7 +348,7 @@ void cover_select(const char *track)
     remote_revision = 0;
     close_files();
     aster_snprintf(track_path, sizeof(track_path), "%s", track);
-    image_w = image_h = 0;
+    /* Keep current pixels visible while the next album cover is loading. */
     extension_index = 0;
     phase = !*track ? DEFAULT : !strcmp(track, "/assets/audio/demo.flac") ? EXTERNAL : SIDECAR;
 }
@@ -359,7 +365,7 @@ void cover_select_remote(const char *path, uint32_t revision)
     selected_initialized = true;
     aster_snprintf(track_path, sizeof(track_path), "%s", path);
     remote_revision = revision;
-    image_w = image_h = 0;
+    /* Remote thumbnail may arrive much later; retain the last cover. */
     phase = EXTERNAL;
 }
 
@@ -375,6 +381,10 @@ bool cover_tick(unsigned cap)
         return open_image(remote_revision ? track_path : "/assets/art/moonlight.bmp", cap, DEFAULT);
     if (phase == DEFAULT) {
         phase = IDLE;
+        /* Optional user-supplied image on the TF card; existing bundled art
+         * remains a safe fallback before the image is copied to the card. */
+        if (decode_native("/music/no_cover_artwork.jpg", cap))
+            return true;
         return decode_native("/assets/art/moonlight.bmp", cap);
     }
     if (phase == EMBEDDED) {
