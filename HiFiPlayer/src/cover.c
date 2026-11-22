@@ -378,11 +378,13 @@ bool cover_tick(unsigned cap)
     if (phase == SIDECAR)
         return sidecar(cap);
     if (phase == EXTERNAL)
-        return open_image(remote_revision ? track_path : "/assets/art/moonlight.bmp", cap, DEFAULT);
+        return open_image(remote_revision ? track_path : "/assets/art/no_cover_artwork.jpg", cap, DEFAULT);
     if (phase == DEFAULT) {
         phase = IDLE;
-        /* Optional user-supplied image on the TF card; existing bundled art
-         * remains a safe fallback before the image is copied to the card. */
+        /* Prefer the requested bundled cover when available, otherwise allow
+         * an SD /music override. Never flash a placeholder on a track change. */
+        if (decode_native("/assets/art/no_cover_artwork.jpg", cap))
+            return true;
         if (decode_native("/music/no_cover_artwork.jpg", cap))
             return true;
         return decode_native("/assets/art/moonlight.bmp", cap);
