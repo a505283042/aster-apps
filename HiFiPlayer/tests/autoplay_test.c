@@ -37,9 +37,8 @@ static int sample(uint32_t state, const char *path)
 int main(void)
 {
     const char *a = "/SD:/music/a.flac", *b = "/SD/music/b.mp3";
-    memcpy(tracks[0], "a.flac", sizeof("a.flac"));
-    memcpy(tracks[1], "b.mp3", sizeof("b.mp3"));
-    track_count = 2;
+    assert(track_append("a.flac", sizeof("a.flac") - 1));
+    assert(track_append("b.mp3", sizeof("b.mp3") - 1));
     library_scanned = true;
     player.mode = ASTER_PLAYER_LOCAL;
     player.capabilities = ASTER_PLAYER_CAP_SYSTEM_OUTPUT;
@@ -91,5 +90,30 @@ int main(void)
     assert(sample(ASTER_PLAYER_ENDED, a) == -1);
     player.mode = ASTER_PLAYER_LOCAL;
     assert(sample(ASTER_PLAYER_ENDED, a) == -1);
+
+    /* New firmware owns auto-next (including outside the APP). */
+    player.capabilities |= ASTER_PLAYER_CAP_AUTO_NEXT;
+    assert(sample(ASTER_PLAYER_PLAYING, a) == -1);
+    assert(sample(ASTER_PLAYER_ENDED, a) == -1);
+    player.capabilities &= ~ASTER_PLAYER_CAP_AUTO_NEXT;
+
+    /* The APP library is not truncated at 64 tracks; both the manual and
+     * legacy-firmware automatic successor must cross the old boundary. */
+    tracks_clear();
+    char name[32], path[80];
+    for (int i = 0; i < 80; i++) {
+        aster_snprintf(name, sizeof(name), "song%03d.flac", i);
+        assert(track_append(name, strlen(name)));
+    }
+    assert(track_count == 80);
+    assert(track_capacity >= 80);
+    aster_snprintf(path, sizeof(path), "/SD:/music/song063.flac");
+    assert(sample(ASTER_PLAYER_PLAYING, path) == -1);
+    assert(current_index() == 63);
+    assert(sample(ASTER_PLAYER_ENDED, path) == 64);
+    aster_snprintf(path, sizeof(path), "/SD:/music/song079.flac");
+    assert(sample(ASTER_PLAYER_PLAYING, path) == -1);
+    assert(sample(ASTER_PLAYER_ENDED, path) == 0);
+    tracks_clear();
     return 0;
 }
