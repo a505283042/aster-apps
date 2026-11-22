@@ -525,6 +525,13 @@ bool hifi_groups_track_artist(uint32_t track_id, char *out, unsigned capacity)
     uint16_t artist_id=track_artists[track_id];
     if (artist_id>=artist_count) return false;
     const char *name=pool_name(artists[artist_id].name_off);
+    /* Match FakePod's display fallback: if the performer tag is missing,
+     * use ALBUMARTIST/TPE2 rather than reporting a false output label. */
+    if (!*name || !strcmp(name,"未知歌手")) {
+        uint16_t album_artist_id=track_album_artists[track_id];
+        if (album_artist_id>=artist_count) return false;
+        name=pool_name(artists[album_artist_id].name_off);
+    }
     if (!*name || !strcmp(name,"未知歌手")) return false;
     aster_snprintf(out,capacity,"%s",name);
     return true;
