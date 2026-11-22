@@ -337,23 +337,29 @@ void hifi_catalog_start(void)
 
 void hifi_catalog_tick(void)
 {
-    /* Warm the old snapshot's 4-byte lookup keys a few rows per frame.
-     * Until complete, no call needs a multi-thousand-seek blocking search. */
-    for (unsigned i = 0; active && !active_hash_failed && i < 4u &&
-                         active_hash_loaded < committed.count; i++) {
+    /* Hydrate 16 consecutive records per tick with ONE seek/read instead of
+     * thousands of single-sector seeks. The steady-state RAM index uses
+     * just four bytes per track; the file still owns all long path strings. */
+    if (active && !active_hash_failed && active_hash_loaded < committed.count) {
+        cat_row_t group[16];
+        uint32_t count = committed.count - active_hash_loaded;
+        if (count > 16u) count = 16u;
         uint32_t offset = (uint32_t)sizeof(cat_header_t) +
                           active_hash_loaded * (uint32_t)sizeof(cat_row_t);
-        cat_row_t row;
         if (aster_fs_seek(active, (int32_t)offset, ASTER_FS_SEEK_SET) < 0 ||
-            !read_exact(active, &row, sizeof(row)) ||
-            !memchr(row.name, 0, sizeof(row.name))) {
-            /* Treat a damaged snapshot as unsearchable; scan continues and
-             * can replace it without forcing a blocking recovery loop. */
+            !read_exact(active, group, count * sizeof(cat_row_t))) {
             active_hash_failed = true;
             active_hash_loaded = 0;
-            break;
+        } else {
+            for (uint32_t i = 0; i < count; i++) {
+                if (!memchr(group[i].name, 0, sizeof(group[i].name))) {
+                    active_hash_failed = true;
+                    active_hash_loaded = 0;
+                    break;
+                }
+                active_hashes[active_hash_loaded++] = name_hash(group[i].name);
+            }
         }
-        active_hashes[active_hash_loaded++] = name_hash(row.name);
     }
     if (verifying) {
         verify_tick();
