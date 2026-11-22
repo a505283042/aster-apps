@@ -10,7 +10,6 @@ static uint16_t pixels[COVER_EDGE * COVER_EDGE];
 static uint16_t dim_pixels[COVER_EDGE * COVER_EDGE];
 static _Alignas(8) uint8_t chunk[COVER_WORK_BYTES];
 static uint32_t image_w, image_h, remaining;
-static uint16_t tint;
 static aster_handle_t input, output;
 static char track_path[256];
 enum cover_phase { IDLE, SIDECAR, EXTERNAL, EMBEDDED, COPY, DECODE_COPY, JPEG, DEFAULT };
@@ -267,17 +266,6 @@ static bool finish_image(uint32_t w, uint32_t h)
     image_w = w;
     image_h = h;
     phase = IDLE;
-    unsigned r = 0, g = 0, b = 0, count = 0;
-    for (unsigned y = 0; y < image_h; y += 4) {
-        for (unsigned x = 0; x < image_w; x += 4) {
-            uint16_t p = pixels[y * image_w + x];
-            r += p >> 11;
-            g += (p >> 5) & 63;
-            b += p & 31;
-            count++;
-        }
-    }
-    tint = (r / count) << 11 | (g / count) << 5 | b / count;
     /* Approximate the original S31 150/255 black overlay once per new album. */
     for (unsigned i = 0, total = image_w * image_h; i < total; i++) {
         uint16_t color = pixels[i];
@@ -463,6 +451,13 @@ bool cover_paint(aster_handle_t surface, unsigned left, unsigned top, unsigned e
     uint16_t *dest = buf.ptr;
     unsigned pitch = buf.pitch / sizeof(uint16_t);
     const uint16_t *art = dimmed ? dim_pixels : pixels;
+    /* Typical square album art is decoded at exactly 460x460. In this
+     * common case only copy the already-baked original/dimmed RGB565 surface. */
+    if (image_w == edge && image_h == edge && left == 0 && top == 0 &&
+        buf.width == edge && buf.height == edge && pitch == edge) {
+        memcpy(dest, art, edge * edge * sizeof(uint16_t));
+        return true;
+    }
     unsigned crop = image_w < image_h ? image_w : image_h;
     unsigned x_crop = (image_w - crop) / 2;
     unsigned y_crop = (image_h - crop) / 2;
