@@ -107,6 +107,36 @@ class HiFiControlsV1(unittest.TestCase):
         lookup = between("static int current_index(void)\n{", "static int library_item_count(")
         self.assertIn("lookup_generation == catalog_generation", lookup)
 
+    def test_next_prev_does_not_flash_last_explicit_library_selection(self):
+        # A global NEXT/PREV is owned by firmware. Its media state briefly
+        # becomes STOPPING -> IDLE while the old path is retained. The UI
+        # must not fall back to the old selected_file during this handoff.
+        selected = between("static const char *display_track(void)",
+                           "static void confirm_media_track(void)")
+        self.assertIn("confirmed_media_track[0]", selected)
+        self.assertIn("!strcmp(active, confirmed_media_track)", selected)
+        self.assertLess(selected.index("confirmed_media_track[0]"),
+                        selected.index("return selected_file[0]"))
+        confirm = between("static void confirm_media_track(void)",
+                          "static const char *title(")
+        for state in ("ASTER_PLAYER_OPENING", "ASTER_PLAYER_PLAYING",
+                      "ASTER_PLAYER_PAUSED"):
+            self.assertIn(state, confirm)
+        self.assertNotIn("aster_kv_set(", confirm)
+        self.assertNotIn("aster_fs_", confirm)
+        poll = between("static void poll(uint32_t now)",
+                       "ASTER_APP_EXPORT int aster_app_init(void)")
+        self.assertIn("confirm_media_track();", poll)
+        self.assertIn("confirmed_media_track[0] = 0;", poll)
+        explicit = between("static void queue_track(const char *path)",
+                           "static void play_index(int index)")
+        self.assertIn("confirmed_media_track[0] = 0;", explicit)
+        self.assertIn("select_track(path);", explicit)
+        transport = between("    case PREVIOUS:\n    case NEXT:",
+                            "    default:")
+        self.assertIn("ASTER_PLAYER_NEXT", transport)
+        self.assertNotIn("queue_track(", transport)
+
     def test_audio_owner_and_cover_mode_unchanged(self):
         self.assertIn("static bool bright_pending = true;", SRC)
         self.assertIn("aster_surface_present(surface)", SRC)
