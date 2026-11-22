@@ -12,6 +12,6 @@ void cover_close(void);
 bool cover_ready(void);
 uint16_t cover_mix(uint16_t base, uint16_t tint, unsigned weight);
 bool cover_paint(aster_handle_t surface, unsigned left, unsigned top, unsigned edge,
-                 uint16_t base, uint16_t accent);
+                 uint16_t base, bool dimmed);
 
 #endif
