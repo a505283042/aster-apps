@@ -25,7 +25,7 @@ class HiFiControlsV1(unittest.TestCase):
         self.assertIn("DESIGN = 460", SRC)
 
     def test_seek_bar_render_and_touch_are_consistent(self):
-        self.assertRegex(SRC, r"PLAY_PROGRESS\\s*=\\s*286")
+        self.assertRegex(SRC, r"PLAY_PROGRESS\s*=\s*286")
         playback = between("static void playback(void)", "static int next_lyric_group(")
         hit = between("static int hit(int x, int y)", "static bool page_swipe_area(")
         self.assertIn("box(60, PLAY_PROGRESS, 340, 10", playback)
