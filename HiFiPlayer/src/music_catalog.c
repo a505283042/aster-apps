@@ -58,6 +58,12 @@ static bool scanning, verifying, has_saved;
 static uint32_t last_stat_log, verify_bytes, verify_crc;
 static cat_header_t pending_header;
 static uint8_t verify_chunk[4096];
+/* Only 4 bytes per song for fast index lookup, not 152-byte path arrays.
+ * The active snapshot is hydrated cooperatively; scan fills the second map. */
+static uint32_t hashes_a[HIFI_CATALOG_TRACK_MAX];
+static uint32_t hashes_b[HIFI_CATALOG_TRACK_MAX];
+static uint32_t *active_hashes = hashes_a, *staging_hashes = hashes_b;
+static uint32_t active_hash_loaded;
 
 static bool read_exact(aster_handle_t file, void *dst, unsigned size)
 {
@@ -90,6 +96,16 @@ static uint32_t crc_step(uint32_t crc, const void *data, unsigned len)
             crc = (crc >> 1) ^ (0xedb88320u & (0u - (crc & 1u)));
     }
     return crc;
+}
+
+static uint32_t name_hash(const char *name)
+{
+    /* FNV-1a: a hash match always performs a full path comparison. */
+    uint32_t h = 2166136261u;
+    while (*name) {
+        h = (h ^ (uint8_t)*name++) * 16777619u;
+    }
+    return h;
 }
 
 static uint32_t row_fingerprint(const cat_row_t *row)
@@ -135,7 +151,9 @@ void hifi_catalog_close(void)
     active = staging = 0;
     active_slot = -1;
     scanning = verifying = has_saved = false;
-    discovered = verify_bytes = 0;
+    discovered = verify_bytes = active_hash_loaded = 0;
+    active_hashes = hashes_a;
+    staging_hashes = hashes_b;
     generation = 0;
 }
 
@@ -256,6 +274,10 @@ static void verify_tick(void)
     staging = 0;
     committed = pending_header;
     active_slot = slot;
+    uint32_t *old_hashes = active_hashes;
+    active_hashes = staging_hashes;
+    staging_hashes = old_hashes;
+    active_hash_loaded = discovered;
     generation = committed.generation;
     has_saved = true;
     verifying = false;
@@ -312,6 +334,23 @@ void hifi_catalog_start(void)
 
 void hifi_catalog_tick(void)
 {
+    /* Warm the old snapshot's 4-byte lookup keys a few rows per frame.
+     * Until complete, no call needs a multi-thousand-seek blocking search. */
+    for (unsigned i = 0; active && i < 4u &&
+                         active_hash_loaded < committed.count; i++) {
+        uint32_t offset = (uint32_t)sizeof(cat_header_t) +
+                          active_hash_loaded * (uint32_t)sizeof(cat_row_t);
+        cat_row_t row;
+        if (aster_fs_seek(active, (int32_t)offset, ASTER_FS_SEEK_SET) < 0 ||
+            !read_exact(active, &row, sizeof(row)) ||
+            !memchr(row.name, 0, sizeof(row.name))) {
+            /* Treat a damaged snapshot as unsearchable; scan continues and
+             * can replace it without forcing a blocking recovery loop. */
+            active_hash_loaded = 0;
+            break;
+        }
+        active_hashes[active_hash_loaded++] = name_hash(row.name);
+    }
     if (verifying) {
         verify_tick();
         return;
@@ -385,6 +424,7 @@ void hifi_catalog_tick(void)
             finish_scan(false);
             break;
         }
+        staging_hashes[discovered] = name_hash(row.name);
         uint32_t h = row_fingerprint(&row);
         sig_xor ^= h;
         sig_sum += h * 0x9e3779b1u;
@@ -429,13 +469,22 @@ bool hifi_catalog_path_at(uint32_t index, char *out, unsigned capacity)
     return true;
 }
 
+bool hifi_catalog_lookup_ready(void)
+{
+    if (active) return active_hash_loaded == committed.count;
+    return !scanning && !verifying && discovered > 0;
+}
+
 int32_t hifi_catalog_find(const char *relative)
 {
     if (!relative || !*relative) return -1;
-    hifi_catalog_status_t stat = hifi_catalog_status();
+    uint32_t target = name_hash(relative);
+    uint32_t count = active ? active_hash_loaded : discovered;
+    const uint32_t *keys = active ? active_hashes : staging_hashes;
     char path[HIFI_CATALOG_PATH_MAX];
-    for (uint32_t i = 0; i < stat.count; i++) {
-        if (hifi_catalog_path_at(i, path, sizeof(path)) &&
+    for (uint32_t i = 0; i < count; i++) {
+        if (keys[i] == target &&
+            hifi_catalog_path_at(i, path, sizeof(path)) &&
             !strcmp(relative, path))
             return (int32_t)i;
     }
