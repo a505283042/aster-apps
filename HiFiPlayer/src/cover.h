@@ -7,7 +7,7 @@
 
 void cover_select(const char *track);
 void cover_select_remote(const char *path, uint32_t revision);
-bool cover_tick(unsigned cap);
+bool cover_tick(aster_handle_t surface, unsigned cap);
 void cover_close(void);
 bool cover_ready(void);
 uint16_t cover_mix(uint16_t base, uint16_t tint, unsigned weight);
