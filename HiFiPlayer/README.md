@@ -246,3 +246,10 @@ aster verify HiFiPlayer/dist/riscv/aster.hifi.ast
 源码级回归测试：`python -m unittest HiFiPlayer/tests/test_controls_v1.py`。
 
 本版 **没有**启用新增硬件 JPEG、PPA Blend、DMA2D、QSPI/PSRAM 直传加速；这些能力按固件驱动＋SDK 可选接口单独实施，不将 FakePod_S31 的私有 Panel IO 结构直接复制进 Aster。真机音频连续性与触控测试仍需验收。
+
+
+## alpha.8 修复：下一曲切换时短暂闪回列表选曲
+
+固件拥有全局 HIF2 队列时，手动 NEXT/PREV 会先 STOP 当前解码器，再在低优先级任务中查索引并开始下一首。中间出现的短暂 `STOPPING → IDLE` 是正常的媒体状态过渡；媒体 `path` 仍是刚才播放的曲目，而 APP 旧的 `display_track()` 会在 `IDLE` 回退到之前从列表中明确选择的 `selected_file`。因而每次切歌时可能短暂显示最初点选的歌名／封面／歌词，随后才显示新曲，视觉上像跳了两首。
+
+修复后新增仅驻留 APP RAM 的 `confirmed_media_track`：只在媒体实际报告 `OPENING / PLAYING / PAUSED` 且路径有效时记录；短暂 `IDLE / ENDED` 时仅对同一个真实媒体路径维持显示。列表明确选新歌时清除该缓存，仍优先尊重用户的新选择；蓝牙与本地模式切换时清除缓存。固件 NEXT/PREV、后台队列、音量、封面解码和 HIF2 磁盘内容均未修改；没有新增 SD 或 KV 写入。源码回归检查已加入 `tests/test_controls_v1.py`。如果实机中是**声音**真实播出了另外一首，而不仅是封面／歌名闪回，应另采集 `hifi_autoplay: manual:` 与 `aster_media` 相关日志分析固件的实际播放调度。
