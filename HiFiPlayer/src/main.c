@@ -1124,7 +1124,10 @@ static void playback(void)
 
     text(36, 26, 388, 30, white, title(name), CENTER);
     const char *by = artist();
-    text(40, 61, 380, 21, secondary, *by ? by : source_label(), CENTER);
+    /* Audio routing has its own bottom indicator. Do not substitute
+     * "有线/蓝牙发射/蓝牙接收" for missing song artist metadata. */
+    if (*by)
+        text(40, 61, 380, 21, secondary, by, CENTER);
     playback_audio_info(tertiary);
 
     /* Give each 74px side button 30px of clear space from the 94px
