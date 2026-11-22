@@ -15,9 +15,15 @@ typedef struct {
     int32_t error;
     bool scanning;
     bool has_saved;
+    bool verifying;
+    uint32_t verify_bytes, verify_total;
+    uint32_t folders_discovered;
 } hifi_catalog_status_t;
 
+/* Load the published HIF2 generation; scan the TF card only if none exists. */
 void hifi_catalog_start(void);
+/* Explicit user request; preserves the previous valid snapshot on failure. */
+void hifi_catalog_rescan(void);
 void hifi_catalog_tick(void);
 void hifi_catalog_close(void);
 /* Close and delete only app-local snapshots. Reopen with hifi_catalog_start(). */
