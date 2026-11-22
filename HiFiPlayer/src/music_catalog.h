@@ -20,6 +20,8 @@ typedef struct {
 void hifi_catalog_start(void);
 void hifi_catalog_tick(void);
 void hifi_catalog_close(void);
+/* Close and delete only app-local snapshots. Reopen with hifi_catalog_start(). */
+void hifi_catalog_drop_snapshots(void);
 hifi_catalog_status_t hifi_catalog_status(void);
 /* Returns the relative UTF-8 path below /music, including nested directories. */
 bool hifi_catalog_path_at(uint32_t index, char *out, unsigned capacity);
