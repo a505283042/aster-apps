@@ -106,6 +106,7 @@ class HiFiControlsV1(unittest.TestCase):
                        "static void change_library_page(int step)")
         self.assertIn("current_index()", step)
         self.assertIn("play_index(next);", step)
+        self.assertIn("hifi_catalog_find_for_idle_step(path+7)", step)
         self.assertIn("ORDER_SEQUENCE", step)
         self.assertIn("ORDER_SHUFFLE", step)
         self.assertIn("track_count", step)
@@ -116,6 +117,20 @@ class HiFiControlsV1(unittest.TestCase):
         self.assertIn("control(id == PREVIOUS ? ASTER_PLAYER_PREVIOUS :", transport)
         # No APP-owned background queue or duplicate decoder ownership.
         self.assertNotIn("queue_track(", transport)
+
+    def test_idle_lookup_can_resolve_unhydrated_hif2(self):
+        catalog = (ROOT / "src/music_catalog.c").read_text(encoding="utf-8")
+        header = (ROOT / "src/music_catalog.h").read_text(encoding="utf-8")
+        self.assertIn("hifi_catalog_find_for_idle_step", header)
+        fallback = catalog[catalog.index("int32_t hifi_catalog_find_for_idle_step("):]
+        self.assertIn("hifi_catalog_find(relative)", fallback)
+        self.assertIn("hifi_catalog_lookup_ready()", fallback)
+        self.assertIn("cat_row_t rows[16]", fallback)
+        self.assertIn("aster_fs_seek(active", fallback)
+        self.assertIn("name_hash(rows[i].name)==hash", fallback)
+        # A cold lookup is a user-action fallback, never progress repaint.
+        draw = between("static void draw(uint32_t now)", "static int hit(int x, int y)")
+        self.assertNotIn("hifi_catalog_find_for_idle_step", draw)
 
     def test_file_tag_artist_preferred_over_lrc_and_remote_status(self):
         artist = between("static const char *artist(void)",
