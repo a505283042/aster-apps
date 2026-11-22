@@ -881,65 +881,89 @@ static void playback_slider(int x, int y, int w, int fill, uint16_t track, uint1
         circle(x + fill, y + 2, 6, accent);
 }
 
+/* The original FakePod_S31 player_home overlay geometry, ported to Aster GE.
+ * Default is dimmed artwork + controls; background tap reveals clean artwork.
+ * The two views share one decoded 460x460 source and never start audio on tap. */
 static void playback(void)
 {
-    char name[256], parameters[48];
-    uint16_t base = RGB(14, 26, 40), accent = RGB(157, 218, 248);
-    uint16_t tray = RGB(24, 43, 63);
-    uint16_t key = cover_mix(base, accent, 34), track = cover_mix(base, accent, 67);
-    uint16_t subtitle = cover_mix(ink, base, 58);
-    if (cover_paint(surface, left, top, content_w, base, accent))
+    const uint16_t base = RGB(14, 23, 36);
+    const uint16_t white = RGB(245, 247, 250);
+    const uint16_t secondary = RGB(212, 218, 224);
+    const uint16_t tertiary = RGB(156, 166, 180);
+    const uint16_t dark = RGB(20, 27, 36);
+    const uint16_t bar = RGB(90, 94, 103);
+    char name[256], params[64], stamp[24];
+
+    if (cover_paint(surface, left, top, content_w, base, controls_visible))
         aster_ge_touch(&gfx, 0, 0, width, height);
     else
         fallback_art(base);
-    text(25, 224, 235, 32, ink, title(name), LEFT);
+
+    /* Full artwork mode has no controls and no invisible transport hit boxes. */
+    if (!controls_visible)
+        return;
+
+    text(36, 26, 388, 30, white, title(name), CENTER);
     const char *by = artist();
-    text(27, 266, 270, 16, subtitle, *by ? by : source_label(), LEFT);
-
+    text(40, 61, 380, 21, secondary, *by ? by : source_label(), CENTER);
+    const char *codec = bluetooth_input() ? "SBC" : format(display_track());
     if (player.rate) {
-        const char *codec = bluetooth_input() ? "SBC" : format(player.path);
-        if (*codec)
-            aster_snprintf(parameters, sizeof(parameters), "%s/%uHz/%ubit", codec, player.rate,
-                           player.bits);
-        else
-            aster_snprintf(parameters, sizeof(parameters), "%uHz/%ubit", player.rate, player.bits);
-        text(264, 234, 171, 14, subtitle, parameters, RIGHT);
-    } else
-        text(264, 233, 171, 16, subtitle, playback_state(), RIGHT);
-    line(26, 291, 435, 291, track);
-    text(27, VOLUME_Y - 8, 47, 14, subtitle, "音量", LEFT);
-    playback_slider(VOLUME_X, VOLUME_Y, VOLUME_W, volume * VOLUME_W / 100, track, accent, true);
+        aster_snprintf(params, sizeof(params), "%s / %u Hz / %u bit", codec,
+                       player.rate, player.bits);
+    } else if (*codec) {
+        aster_snprintf(params, sizeof(params), "%s · %s", codec, playback_state());
+    } else {
+        aster_snprintf(params, sizeof(params), "%s", playback_state());
+    }
+    text(25, 94, 410, 17, tertiary, params, CENTER);
 
-    char stamp[24];
+    /* Transport: previous/next 74px, main play/pause 94px. */
+    circle(132, 194, 37, RGB(90, 95, 105));
+    circle(328, 194, 37, RGB(90, 95, 105));
+    circle(230, 194, 47, RGB(233, 236, 240));
+    /* Distinct, legible previous / next icons on the muted circular buttons. */
+    box(119, 182, 5, 24, 1, white, false);
+    triangle(126, 194, 145, 182, 145, 206, white);
+    triangle(315, 182, 335, 194, 315, 206, white);
+    box(337, 182, 5, 24, 1, white, false);
+    if (player.state == ASTER_PLAYER_PLAYING) {
+        box(215, 177, 10, 34, 2, dark, false);
+        box(235, 177, 10, 34, 2, dark, false);
+    } else {
+        triangle(216, 174, 253, 194, 216, 214, dark);
+    }
+
+    /* Seek bar, 340px × 10px, matching the reference center alignment. */
+    box(60, PLAY_PROGRESS, 340, 10, 5, bar, false);
     uint32_t pos = position();
     if (player.duration_ms && pos > player.duration_ms)
         pos = player.duration_ms;
+    int filled = player.duration_ms ? (int)((uint64_t)pos * 340 / player.duration_ms) : 0;
+    if (filled)
+        box(60, PLAY_PROGRESS, filled, 10, 5, white, false);
+    if (can_seek())
+        circle(60 + filled, PLAY_PROGRESS + 5, 9, white);
     clock_text(stamp, pos);
-    text(25, 348, 153, 48, seeking != SEEK_IDLE ? accent : ink,
-         has_position() ? stamp : "--:--", LEFT);
-    if (player.duration_ms)
-        clock_text(stamp, player.duration_ms);
-    text(177, 376, 60, 14, subtitle, player.duration_ms ? stamp : "--:--", RIGHT);
-    int fill = player.duration_ms ? (uint64_t)pos * PLAY_SEEK_W / player.duration_ms : 0;
-    playback_slider(PLAY_SEEK_X, PLAY_PROGRESS, PLAY_SEEK_W, fill, track, accent, can_seek());
+    text(60, 279, 110, 18, secondary, has_position() ? stamp : "--:--", LEFT);
+    clock_text(stamp, player.duration_ms);
+    text(290, 279, 110, 18, secondary, player.duration_ms ? stamp : "--:--", RIGHT);
 
-    box(PANEL_X, PANEL_Y, PANEL_W, PANEL_H, 19, tray, false);
-    box(STEP_X, STEP_UP, STEP_W, STEP_H, 12, finger.control == PREVIOUS ? track : key, false);
-    box(STEP_X, STEP_DOWN, STEP_W, STEP_H, 12, finger.control == NEXT ? track : key, false);
-    box(TOGGLE_X, STEP_UP, TOGGLE_W, STEP_DOWN + STEP_H - STEP_UP, 15,
-        finger.control == TOGGLE ? ink : accent, false);
-    int cx = STEP_X + STEP_W / 2, prev_y = STEP_UP + STEP_H / 2, next_y = STEP_DOWN + STEP_H / 2;
-    box(cx - 12, prev_y - 10, 3, 20, 1, ink, false);
-    triangle(cx - 6, prev_y, cx + 11, prev_y - 10, cx + 11, prev_y + 10, ink);
-    triangle(cx - 11, next_y - 10, cx + 6, next_y, cx - 11, next_y + 10, ink);
-    box(cx + 9, next_y - 10, 3, 20, 1, ink, false);
-    cx = TOGGLE_X + TOGGLE_W / 2;
-    int cy = PANEL_Y + PANEL_H / 2;
-    if (player.state == ASTER_PLAYER_PLAYING) {
-        box(cx - 10, cy - 15, 7, 30, 2, base, false);
-        box(cx + 3, cy - 15, 7, 30, 2, base, false);
-    } else
-        triangle(cx - 9, cy - 16, cx + 15, cy, cx - 9, cy + 16, base);
+    /* Original bottom-row anchors: mode x48, volume x123..337, mute/status.
+     * Cassette and a second song-select start page are intentionally absent. */
+    box(48, 346, 60, 60, 18, RGB(56, 62, 72), false);
+    const char *mode_name = playback_mode == ORDER_SHUFFLE ? "随机" :
+                            playback_mode == ORDER_REPEAT ? "单曲" : "顺序";
+    text(48, 362, 60, 21, white, mode_name, CENTER);
+    box(123, VOLUME_Y, VOLUME_W, 9, 5, bar, false);
+    int volume_fill = clamp(volume, 0, 100) * VOLUME_W / 100;
+    if (volume_fill)
+        box(VOLUME_X, VOLUME_Y, volume_fill, 9, 5, white, false);
+    circle(VOLUME_X + volume_fill, VOLUME_Y + 4, 9, white);
+    box(86, 319, 120, 28, 14, RGB(49, 57, 67), false);
+    aster_snprintf(params, sizeof(params), "%d%%", volume);
+    text(106, 321, 80, 21, white, params, CENTER);
+    box(352, 346, 60, 60, 18, RGB(56, 62, 72), false);
+    text(352, 362, 60, 22, white, volume ? "音量" : "静音", CENTER);
 }
 
 static int next_lyric_group(int first)
@@ -1418,6 +1442,8 @@ static int hit(int x, int y)
         if (x >= 48 && x < 108 && y >= 346 && y < 406)
             return MODE;
         if (x >= 86 && x < 206 && y >= 315 && y < 347)
+            return MUTE;
+        if (x >= 352 && x < 412 && y >= 346 && y < 406)
             return MUTE;
         if (x >= 95 && x < 169 && y >= 157 && y < 231)
             return PREVIOUS;
