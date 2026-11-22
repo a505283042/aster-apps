@@ -1051,10 +1051,10 @@ static void playback_audio_info(uint16_t secondary)
     int index = bluetooth_input() ? -1 : current_index();
     if (index >= 0 && track_count > 0) {
         if (*rate)
-            aster_snprintf(params, sizeof(params), "%04u / %u · %s · %s",
+            aster_snprintf(params, sizeof(params), "%u / %u · %s · %s",
                            (unsigned)(index + 1), (unsigned)track_count, codec, rate);
         else
-            aster_snprintf(params, sizeof(params), "%04u / %u · %s",
+            aster_snprintf(params, sizeof(params), "%u / %u · %s",
                            (unsigned)(index + 1), (unsigned)track_count, codec);
     } else if (*codec && *rate)
         aster_snprintf(params, sizeof(params), "%s · %s", codec, rate);
@@ -1091,13 +1091,15 @@ static void playback(void)
     text(40, 61, 380, 21, secondary, *by ? by : source_label(), CENTER);
     playback_audio_info(tertiary);
 
-    circle(132, 194, 37, RGB(90, 95, 105));
-    circle(328, 194, 37, RGB(90, 95, 105));
+    /* Give each 74px side button 30px of clear space from the 94px
+     * centre button (was 14px), without moving the centre control. */
+    circle(116, 194, 37, RGB(90, 95, 105));
+    circle(344, 194, 37, RGB(90, 95, 105));
     circle(230, 194, 47, RGB(233, 236, 240));
-    box(119, 182, 5, 24, 1, white, false);
-    triangle(126, 194, 145, 182, 145, 206, white);
-    triangle(315, 182, 335, 194, 315, 206, white);
-    box(337, 182, 5, 24, 1, white, false);
+    box(103, 182, 5, 24, 1, white, false);
+    triangle(110, 194, 129, 182, 129, 206, white);
+    triangle(331, 182, 351, 194, 331, 206, white);
+    box(353, 182, 5, 24, 1, white, false);
     if (player.state == ASTER_PLAYER_PLAYING) {
         box(215, 177, 10, 34, 2, dark, false);
         box(235, 177, 10, 34, 2, dark, false);
@@ -1789,9 +1791,9 @@ static int hit(int x, int y)
             return MODE;
         if (x >= 352 && x < 412 && y >= 382 && y < 442)
             return PLAY_LIST;
-        if (x >= 95 && x < 169 && y >= 157 && y < 231)
+        if (x >= 79 && x < 153 && y >= 157 && y < 231)
             return PREVIOUS;
-        if (x >= 291 && x < 365 && y >= 157 && y < 231)
+        if (x >= 307 && x < 381 && y >= 157 && y < 231)
             return NEXT;
         if (x >= 183 && x < 277 && y >= 147 && y < 241)
             return TOGGLE;
