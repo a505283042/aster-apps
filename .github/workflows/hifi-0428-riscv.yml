@@ -47,14 +47,14 @@ jobs:
 
       - name: Host tests (autoplay and >64 track scan)
         run: |
-          gcc -std=c11 -O1 -ffunction-sections -fdata-sections -Wl,--gc-sections -Wno-attributes \\
-            -I aster-sdk/include -I aster-sdk/lib/aster \\
-            HiFiPlayer/tests/autoplay_test.c aster-sdk/lib/aster/aster_printf.c \\
+          gcc -std=c11 -O1 -ffunction-sections -fdata-sections -Wl,--gc-sections -Wno-attributes \
+            -I aster-sdk/include -I aster-sdk/lib/aster \
+            HiFiPlayer/tests/autoplay_test.c aster-sdk/lib/aster/aster_printf.c \
             -o /tmp/hifi-autoplay-test
           /tmp/hifi-autoplay-test
-          gcc -std=c11 -O1 -ffunction-sections -fdata-sections -Wl,--gc-sections -Wno-attributes \\
-            -I aster-sdk/include -I aster-sdk/lib/aster \\
-            HiFiPlayer/tests/library_scan_test.c aster-sdk/lib/aster/aster_printf.c \\
+          gcc -std=c11 -O1 -ffunction-sections -fdata-sections -Wl,--gc-sections -Wno-attributes \
+            -I aster-sdk/include -I aster-sdk/lib/aster \
+            HiFiPlayer/tests/library_scan_test.c aster-sdk/lib/aster/aster_printf.c \
             -o /tmp/hifi-library-scan-test
           /tmp/hifi-library-scan-test
 
