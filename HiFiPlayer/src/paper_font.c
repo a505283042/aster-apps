@@ -82,7 +82,8 @@ bool paper_font_open(paper_font_t *font, bool bold)
                 uint32_t cp = le16(entry);
                 uint32_t length = le16(entry + 2);
                 uint32_t offset = le32(entry + 4);
-                if (!cp || (i && cp <= previous_cp) || !length ||
+                /* Blank glyphs (e.g. SPACE) correctly have zero packet bytes. */
+                if (!cp || (i && cp <= previous_cp) ||
                     offset < previous_offset ||
                     (uint64_t)offset + length > packet_bytes)
                     valid = false;
