@@ -253,3 +253,18 @@ aster verify HiFiPlayer/dist/riscv/aster.hifi.ast
 固件拥有全局 HIF2 队列时，手动 NEXT/PREV 会先 STOP 当前解码器，再在低优先级任务中查索引并开始下一首。中间出现的短暂 `STOPPING → IDLE` 是正常的媒体状态过渡；媒体 `path` 仍是刚才播放的曲目，而 APP 旧的 `display_track()` 会在 `IDLE` 回退到之前从列表中明确选择的 `selected_file`。因而每次切歌时可能短暂显示最初点选的歌名／封面／歌词，随后才显示新曲，视觉上像跳了两首。
 
 修复后新增仅驻留 APP RAM 的 `confirmed_media_track`：只在媒体实际报告 `OPENING / PLAYING / PAUSED` 且路径有效时记录；短暂 `IDLE / ENDED` 时仅对同一个真实媒体路径维持显示。列表明确选新歌时清除该缓存，仍优先尊重用户的新选择；蓝牙与本地模式切换时清除缓存。固件 NEXT/PREV、后台队列、音量、封面解码和 HIF2 磁盘内容均未修改；没有新增 SD 或 KV 写入。源码回归检查已加入 `tests/test_controls_v1.py`。如果实机中是**声音**真实播出了另外一首，而不仅是封面／歌名闪回，应另采集 `hifi_autoplay: manual:` 与 `aster_media` 相关日志分析固件的实际播放调度。
+
+
+## 0.5.0-alpha.9：JPEG 硬件解码＋PPA 压暗（阶段 B）
+
+沿用 460×460 V1 控件布局、播放模式、全局歌曲队列与蓝牙状态，中间单一音频来源指示不变。本版只修改封面图片处理。
+
+- 独立 `.jpg/.jpeg` 封面优先尝试 `aster_img_render` V2 硬件解码；失败自动使用已有软件解码，不改变 PNG/BMP。
+- MP3 ID3 APIC 与 FLAC PICTURE 仍用 APP 现有的标签解析代码确定精确的封面字节范围；将文件路径、偏移、长度交给固件 V2，不额外将内嵌 JPEG 写到 TF 临时文件。失败时沿用旧版 `cover_jpeg_begin/step` 分帧软件解码。
+- V2 成功时固件一次返回原始 RGB565 与 PPA 压暗 RGB565；显示页只切换这两张已生成图片。硬解／压暗仅在实际请求新封面时执行，不因进度条刷新重新执行。硬解失败时仍沿用原来的完成后交换封面策略。
+- **旧固件兼容：** 没有新增必需 WASM 导入。APP 使用旧 SDK 4.5.0 的 `aster_img_render` 导入和局部定义的可选 V2 数据结构；旧固件会拒绝参数，然后回退软件。硬件加速要先更新 S31 固件，相关源码位于 `aster-firmware/systems/espidf/components/aster_render/hifi_cover_accel.c`。
+- 硬件封面受原图尺寸及压缩数据大小限制；渐进式 JPEG、超大封面或引擎不可用不代表文件损坏。未通过真机验证前请保留 alpha.8 的软件封面 APP／上一个稳定固件以便回退。
+
+源码级测试：`python -m unittest HiFiPlayer/tests/test_cover_stage_b.py HiFiPlayer/tests/test_controls_v1.py`。构建/验证仍为 `aster build HiFiPlayer --target riscv --aot` 与 `aster verify HiFiPlayer/dist/riscv/aster.hifi.ast`。成功安装后观察串口 `HiFi cover swap ... backend=JPEG_HW dim=PPA`；若只看到旧的 `HiFi cover swap ...`，说明使用软件回退（需检查固件版本及硬解日志）。
+
+**本轮代码已提交云端，尚未运行用户 Windows ESP-IDF 编译和实机测试。**
