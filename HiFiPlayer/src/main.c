@@ -1016,12 +1016,22 @@ static void list_icon(uint16_t color)
 
 static void playback_status_pills(uint16_t white, uint16_t muted_color)
 {
-    const char *const names[] = {"有线", "蓝牙接收", "蓝牙发射", "提示"};
+    /* The fourth slot is a useful playback state when no transient notice
+     * exists. The actual alert text is still shown by the existing toast. */
+    const char *activity = message[0] ? "提示" :
+                           player.state == ASTER_PLAYER_ERROR ? "播放错误" :
+                           player.state == ASTER_PLAYER_PLAYING ? "播放中" :
+                           player.state == ASTER_PLAYER_PAUSED ? "已暂停" :
+                           player.state == ASTER_PLAYER_OPENING ? "加载中" :
+                           player.state == ASTER_PLAYER_STOPPING ? "切换中" :
+                           player.state == ASTER_PLAYER_ENDED ? "已结束" : "待机";
+    const char *const names[] = {"有线", "蓝牙接收", "蓝牙发射", activity};
     bool active[] = {
         !bluetooth_input() && !(player.flags & ASTER_PLAYER_F_BT_OUTPUT),
         bluetooth_input(),
         !bluetooth_input() && (player.flags & ASTER_PLAYER_F_BT_OUTPUT),
-        (message[0] != 0) || player.state == ASTER_PLAYER_ERROR
+        message[0] || player.state == ASTER_PLAYER_PLAYING ||
+        player.state == ASTER_PLAYER_ERROR
     };
     for (int i = 0; i < 4; ++i) {
         int x = 22 + i * 105;
