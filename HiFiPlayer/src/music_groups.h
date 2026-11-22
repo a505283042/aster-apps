@@ -31,4 +31,7 @@ bool hifi_groups_get(int mode, uint32_t group_index, hifi_group_info_t *out);
 bool hifi_groups_select(int mode, uint32_t group_index);
 uint32_t hifi_groups_selection_count(void);
 bool hifi_groups_selection_track(uint32_t ordinal, uint32_t *catalog_id);
+/* UI lookup by global HIF2 track ID. Does not read TF and works with a
+ * validated group snapshot or already classified rows while building. */
+bool hifi_groups_track_artist(uint32_t track_id, char *out, unsigned capacity);
 #endif
