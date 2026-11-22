@@ -27,6 +27,9 @@ class ArtistMetadata(unittest.TestCase):
         self.assertIn('memcpy(m->artist+used," / ",3)', TAGS)
         self.assertIn("HIFI_TAG_TEXT_MAX = 192", TAG_API)
         self.assertIn("TAG_READ_CAP = 16 * 1024", TAGS)
+        # Aster's WASM SDK intentionally omits strstr from its libc.
+        self.assertIn("const char *end=cursor;", TAGS)
+        self.assertNotIn('const char *next=strstr(', TAGS)
 
     def test_cache_version_and_local_artist_lookup(self):
         self.assertIn("GC_VERSION = 2", GROUPS)
