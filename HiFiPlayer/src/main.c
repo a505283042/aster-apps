@@ -6,6 +6,8 @@
 #include "lrc.h"
 #include "paper.h"
 #include "shake.h"
+#include <stdlib.h>
+#include <limits.h>
 
 enum page { LYRICS, PLAYBACK, LIBRARY, PAPER };
 
@@ -23,7 +25,10 @@ enum control {
     TRACK_FIRST
 };
 
-enum { DESIGN = 460, ROWS = 5, TRACK_LIMIT = 64, PROGRESS_X = 33, PROGRESS_W = 394 };
+enum { DESIGN = 460, ROWS = 5, PROGRESS_X = 33, PROGRESS_W = 394 };
+#ifndef ASTER_PLAYER_CAP_AUTO_NEXT
+#define ASTER_PLAYER_CAP_AUTO_NEXT 128u /* Optional system-owned playlist, ABI 4.5 compatible. */
+#endif
 
 enum {
     HEADER_END = 59,
@@ -67,10 +72,12 @@ static uint32_t width, height, content_w, content_h;
 static int left, top;
 static aster_player_info_t player;
 static uint32_t last_poll, visible_second;
-static int volume, library_page, track_count, scan_error;
+static int volume, library_page, track_count, track_capacity, scan_error;
 static bool dirty, library_scanned;
 static enum page page = PLAYBACK;
-static char tracks[TRACK_LIMIT][248], current_file[256], queued_file[256];
+/* Keep exactly the filenames we find; no fixed 64-entry catalog or 248-byte slots. */
+static char **tracks;
+static char current_file[256], queued_file[256];
 static char playing_track[sizeof(current_file)];
 static bool start_busy;
 static uint32_t start_retry_until;
@@ -348,10 +355,48 @@ static void scan_close(void)
     directory = 0;
 }
 
+static void tracks_clear(void)
+{
+    for (int i = 0; i < track_count; i++)
+        free(tracks[i]);
+    free(tracks);
+    tracks = NULL;
+    track_count = track_capacity = 0;
+}
+
+static bool track_append(const char *name, size_t length)
+{
+    if (track_count == INT_MAX || length >= 248)
+        return false;
+    char *copy = malloc(length + 1);
+    if (!copy)
+        return false;
+    if (track_count == track_capacity) {
+        int next_capacity = track_capacity ? track_capacity * 2 : 64;
+        if (next_capacity <= track_capacity ||
+            (size_t)next_capacity > SIZE_MAX / sizeof(*tracks)) {
+            free(copy);
+            return false;
+        }
+        char **next = realloc(tracks, (size_t)next_capacity * sizeof(*tracks));
+        if (!next) {
+            free(copy);
+            return false;
+        }
+        tracks = next;
+        track_capacity = next_capacity;
+    }
+    memcpy(copy, name, length);
+    copy[length] = 0;
+    tracks[track_count++] = copy;
+    return true;
+}
+
 static void scan_start(void)
 {
     scan_close();
-    track_count = library_page = 0;
+    tracks_clear();
+    library_page = 0;
     library_scanned = false;
     scan_error = aster_fs_opendir("/music", 6, &directory);
     if (scan_error < 0) {
@@ -370,14 +415,12 @@ static void scan_tick(void)
             scan_error = n;
             scan_close();
             library_scanned = true;
-        } else if (!is_dir && (size_t)n < sizeof(tracks[0])) {
+        } else if (!is_dir && (size_t)n < 248) {
             name[n] = 0;
-            if (*format(name)) {
-                memcpy(tracks[track_count++], name, n + 1);
-                if (track_count == TRACK_LIMIT) {
-                    scan_close();
-                    library_scanned = true;
-                }
+            if (*format(name) && !track_append(name, (size_t)n)) {
+                scan_error = ASTER_ENOMEM;
+                scan_close();
+                library_scanned = true;
             }
         }
         if (page == LIBRARY)
@@ -1244,7 +1287,9 @@ static void library(void)
 {
     char temp[256];
     if (!library_scanned)
-        aster_snprintf(temp, sizeof(temp), "正在读取 SD / music");
+        aster_snprintf(temp, sizeof(temp), "SD / music · %d 首（扫描中）", track_count);
+    else if (scan_error == ASTER_ENOMEM)
+        aster_snprintf(temp, sizeof(temp), "SD / music · %d 首（内存不足）", track_count);
     else
         aster_snprintf(temp, sizeof(temp), "SD / music · %d 首", track_count);
     text(25, 71, 252, 18, muted, temp, LEFT);
@@ -1391,6 +1436,11 @@ static bool media_in_use(void)
  * library track we actually saw running, or successfully started ourselves. */
 static int automatic_next(void)
 {
+    /* A newer firmware owns the whole playlist, including after APP exit. */
+    if (player.capabilities & ASTER_PLAYER_CAP_AUTO_NEXT) {
+        playing_track[0] = 0;
+        return -1;
+    }
     const char *path = sandbox_track(player.path);
     if (player.mode != ASTER_PLAYER_LOCAL || queued_file[0] || strncmp(path, "/music/", 7)) {
         playing_track[0] = 0;
@@ -1739,6 +1789,7 @@ ASTER_APP_EXPORT void aster_app_resume(void)
 static void cleanup(void)
 {
     scan_close();
+    tracks_clear();
     lyrics_close();
     cover_close();
     if (surface) {
