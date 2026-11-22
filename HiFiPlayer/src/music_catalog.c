@@ -10,7 +10,9 @@
  * not be detected until a future firmware metadata API is available.
  *
  * All records remain on SD instead of consuming WASM memory for thousands
- * of fixed 248-byte paths. The 5-row UI is a naturally virtualized reader.
+ * of fixed 152-byte paths. The 5-row UI is a naturally virtualized reader.
+ * Aster IDF currently permits only four open directory handles and sandbox
+ * API paths shorter than 160 bytes; fit these actual native bounds.
  */
 #include "music_catalog.h"
 #include <aster_imports.h>
@@ -18,8 +20,8 @@
 
 enum {
     CAT_MAGIC = 0x32464948u, /* "HIF2" */
-    CAT_VERSION = 1,
-    CAT_DEPTH = 8,
+    CAT_VERSION = 2,
+    CAT_DEPTH = 4,
     CAT_STEP_ENTRIES = 8,
     CAT_STEP_MS = 7
 };
@@ -27,7 +29,7 @@ static const char *const paths[2] = {
     "/data/hifi_catalog_a.bin", "/data/hifi_catalog_b.bin"
 };
 
-/* Stable disk layout: all header fields are u32, record is exactly 256B.
+/* Stable disk layout: all header fields are u32, record is exactly 160B.
  * Deliberately not binary-compatible with ESP-IDF's V2 metadata Catalog. */
 typedef struct {
     uint32_t magic, version, generation, count;
