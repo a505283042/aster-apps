@@ -161,12 +161,16 @@ static void append_artist(hifi_tags_t *m, const char *value)
     const char *cursor=m->artist;
     size_t len=strlen(clean);
     while (*cursor) {
-        if (!strncmp(cursor,clean,len) &&
-            (cursor[len]==0 || !strncmp(cursor+len," / ",3)))
+        /* Aster's freestanding libc has no strstr(). Walk the existing
+         * " / "-separated entries directly and compare whole names only. */
+        const char *end=cursor;
+        while (*end &&
+               !(end[0]==' ' && end[1]=='/' && end[2]==' '))
+            end++;
+        if ((size_t)(end-cursor)==len && !strncmp(cursor,clean,len))
             return;
-        const char *next=strstr(cursor," / ");
-        if (!next) break;
-        cursor=next+3;
+        if (!*end) break;
+        cursor=end+3;
     }
     size_t used=strlen(m->artist);
     if (used+3u+len>=sizeof(m->artist)) return;
