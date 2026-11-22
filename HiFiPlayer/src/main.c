@@ -1558,7 +1558,7 @@ static int automatic_next(void)
     /* ENDED is no longer considered active by display_track(); resolve the
      * actual ended player.path, not a separately saved UI selection. */
     int index = hifi_catalog_find(path + 7);
-    if (index < 0 || scan_error < 0)
+    if (index < 0 || (scan_error < 0 && !hifi_catalog_status().has_saved))
         return -1;
     if (playback_mode == ORDER_REPEAT)
         return index;
