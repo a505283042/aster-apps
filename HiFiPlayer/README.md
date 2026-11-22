@@ -183,3 +183,48 @@ cd D:\ESP32\aster-apps
 - **向后兼容**：旧固件若只有 `CAP_AUTO_NEXT`，模式按钮显示「固件」，点击解释「当前固件尚不支持四种后台模式」，不伪装已切换成功。没有固件自动切歌能力的极老平台，APP 使用自己的回退队列（四种模式，KV `play_mode_v2`）。
 - **保持原样**：v0.5.0-alpha.5 的 TF 共享艺术字（无需重拷）、460x460 原色/压暗封面、歌词和界面分组、双槽 Catalog/Metadata 缓存、蓝牙收发、音频解码线程、I2S 与 TF 访问方式（仅固件后台 EOF 时索引访问改变）。
 - **未验证声明**：上述代码已在云端开发分支提交并经过源码级检查，尚未通过 ESP-IDF 6.1.0 / Aster SDK 4.5.0 编译和真机测试。请**先编译 APP，不烧录未构建的固件**；保留用户刚实测通过的 alpha.5 安装包与 USB MSC 固件作为回退基线。测试中如出现新卡顿，先回退固件并分析后台状态。
+
+
+## 0.5.0-alpha.7：首次建库、HFD1 持久目录索引、无重复全盘扫描
+
+**当前仅云端开发版；尚未经过 Windows Aster SDK 编译或 S31 真机测试。** 使用独立分支 `feat/hifi-s31-indexed-folders`，以 alpha.6 为基线。配套 S31 实验固件 `feat/s31-hifi-global-playback` 不需要为本 APP 变更而重新刷写。
+
+### 行为和职责
+
+- **已有有效 HIF2 Catalog：APP 启动直接恢复旧快照**，不再执行每次启动的递归 `/music` 全盘扫描。即使没有 HFD1，也可以直接从 HIF2 全曲目视图播放。
+- **首次安装、没有有效 HIF2：自动创建基础曲库**，在完成 CRC 校验和双槽发布前不开放本地曲库选歌/自动队列。试听 Demo 和手机蓝牙接收仍独立。首次 UI 显示已发现歌曲数、文件夹数；总数未知时不伪造百分比。文件扫描完成后显示已校验记录数和真实进度条。
+- **HFD1 文件夹目录索引**：从已发布的 HIF2 生成父子目录节点和子项引用，全部使用全局 Track ID（不创建新播放队列）。每级目录的歌曲引用连续存放，打开文件夹只用内存目录结构；读取当前页真实歌曲名时仍需访问最多五条 HIF2 记录，不再遍历整个全曲库。
+- HFD1 存储为 `/data/hifi_folders_a.bin` 和 `/data/hifi_folders_b.bin`，每份带 `magic/version`、HIF2 generation、曲目总量、目录数、Header CRC32、payload CRC32。空闲后台分块生成/回读校验；仅在 payload 验证成功后写入有效 Header。系统异常或断电时，损坏缓存会重新从 HIF2 建立，不会删除 HIF2 音乐记录。
+- APP 启动按代数恢复 HFD1，按块校验后一次进入可浏览状态。若 HIF2 重扫发布了新一代，文件夹目录缓存自动失效并重建。歌手／专辑／年代仍使用原双槽标签分组缓存。
+- 「重扫」继续 4 秒内二次确认，**只在用户确认后重新检查 TF 卡**；有效 HIF2 旧代保留供播放和浏览，校验通过后才原子切换新代。扫描失败不会事先删除旧 HIF2 或标签缓存。请注意：**USB 新增、删除歌曲后需要手动点击「重扫」**，本版不依赖未经实现的自动文件变更通知。
+- 音乐播放中暂停 HIF2/HFD1 的后台存储扫描和大量 CRC 读取，避免 UI 额外存储压力。首次 HFD1 生成过程中如已在播音乐，文件夹页将提示「暂停音乐后继续加载目录索引」。已完成的目录树在 RAM 中切换，不需要新增磁盘读取。
+- HFD1 本版最多记录 **1024 个有歌曲的目录**（含 `/music` 根目录），最多 **16,384 首歌曲**，并严格继承 HIF2 对文件路径长度与目录深度的限制。达到上限会明确报错，而不是悄悄丢弃部分文件。
+- 新目录索引约额外使用 **280–300 KiB** 的静态 WASM 内存；APP 预算提升至 `initial_memory=4 MiB`、`max_memory=5 MiB`。这仅影响 APP，不改已有音频解码器、艺术歌词字库、封面双状态、USB MSC、固件分区。可继续沿用 alpha.5 建立的 TF 共享字体。
+- `tests/test_folder_index.py` 在具备本机 C 编译器时通过独立临时目录，编译真实 `music_browser.c`，验证多级文件夹、全局歌曲 ID、已提交快照重载与 HIF2 generation 变更后目录重建。此测试代码已提交，但尚未在当前对话环境执行。
+
+### Windows 测试与升级
+
+先保留 alpha.6 已确认可运行的 AST 文件。不要覆盖其它已稳定 APP 和固件。将测试分支检出到 **新的本地分支**：
+
+```powershell
+cd D:\ESP32\aster-apps
+git fetch origin feat/hifi-s31-indexed-folders
+git switch -c feat/hifi-s31-indexed-folders origin/feat/hifi-s31-indexed-folders
+. "D:\ESP32\aster-sdk-4.5.0\env.ps1"
+
+aster build HiFiPlayer --target riscv --aot
+if ($LASTEXITCODE -ne 0) { throw "alpha.7 build failed" }
+aster verify HiFiPlayer/dist/riscv/aster.hifi.ast
+```
+
+**务必确认** `aster verify` 显示 `ver=0.5.0-alpha.7`，而不是在失败构建后误以为缓存的旧 AST 是新包。已经建立的 `/sd/aster/shared/hifi/fonts/` 无需重复复制。
+
+安装时沿用已验证的 USB MSC 模式：先将 APP 包拷贝到 TF 卡 `aster/install/aster.hifi.ast`，Windows 安全弹出，再使用 `aster shell --console COM3 aster app install /SD:/aster/install/aster.hifi.ast`（实际 COM 以设备端口为准）。**本轮不需要重刷固件。**
+
+验证重点：从 APP 退出重进，不再打印 `HiFi catalog scan start cached=...`，而是 `HiFi catalog restored tracks=... (no rescan)`；首次打开文件夹只生成 HFD1 一次，之后多层快速切换；手动重扫后旧曲库保留到提交新代；初次空卡创建索引时显示歌曲／文件夹数量和 CRC 验证进度；播放状态下无多余的曲库后台扫描。
+
+### 当前版本限制
+
+- HIF2 的文件大小/相对路径指纹无法检测“同一路径、同样大小但内容已替换”的修改；这类情况下 HIF2 generation 可能不变化，标签和文件夹缓存沿用旧 generation。需要进一步元数据/mtime 能力解决。
+- HIF2 的旧索引恢复仍基于已有 Header CRC 与文件尺寸检查，未新增“每次启动全表读取 CRC”步骤。HFD1 则会从磁盘分块计算 payload CRC；这是刻意避免每次重启都全盘读取音乐文件。
+- 尚未进行 SDK 4.5.0 的最终编译/实机与 USB MSC 回归验收。在确认 alpha.7 通过前，保留 alpha.6 作为回退安装包。
