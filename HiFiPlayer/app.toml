@@ -2,7 +2,7 @@
 id = "aster.hifi"
 name = "Aster 音乐"
 description = "滑动切换播放、同步歌词和曲库，支持本地音乐与蓝牙音频。"
-version = "0.4.27"
+version = "0.4.28"
 abi = "4.5.0"
 abi_min = "4.5"
 aot = true
