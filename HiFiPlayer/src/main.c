@@ -66,6 +66,8 @@ static aster_player_info_t player;
 static uint32_t last_poll, visible_second;
 static int library_page, track_count, scan_error;
 static bool dirty, library_scanned, controls_visible = true;
+/* Full-art page uses an explicit native surface present, never a zero-command GE flush. */
+static bool bright_pending = true;
 enum playback_order { ORDER_NORMAL, ORDER_REPEAT, ORDER_SHUFFLE };
 static enum playback_order playback_mode = ORDER_NORMAL;
 static uint32_t shuffle_seed = 0x6b7b3d29;
@@ -719,6 +721,7 @@ static void set_page(enum page target)
     lyric_animating = false;
     if (target == PLAYBACK) {
         controls_visible = true;
+        bright_pending = true;
         sync_media(); /* Refresh the album selection before returning home. */
     }
     /* Invalidate the whole surface after navigating away from another page. */
@@ -1375,6 +1378,32 @@ static void library(void)
 
 static void draw(uint32_t now)
 {
+    if (page == PLAYBACK && !controls_visible) {
+        /* The pure-cover state has no GE commands. A hand-painted surface
+         * needs a native whole-surface present: a zero-command GE flush
+         * is not a reliable substitute on every firmware renderer. */
+        if (!bright_pending)
+            return; /* Progress and metadata changes should not repaint art. */
+        bright_pending = false;
+        bool painted = cover_paint(surface, left, top, content_w,
+                                   RGB(14, 23, 36), false);
+        int result;
+        if (painted) {
+            result = aster_surface_present(surface);
+            aster_printf("HiFi bright native present rc=%d ready=%u",
+                         result, (unsigned)cover_ready());
+        } else {
+            fallback_art(RGB(47, 77, 109));
+            result = aster_ge_present(&gfx);
+            aster_printf("HiFi bright fallback rc=%d ready=%u",
+                         result, (unsigned)cover_ready());
+        }
+        if (result < 0) {
+            aster_errfmt("HiFi bright render %d", result);
+            bright_pending = true;
+        }
+        return;
+    }
     if (page == PAPER) {
         int result = draw_paper(now);
         if (result < 0)
@@ -1718,7 +1747,11 @@ static void touch(const aster_event_t *event)
         /* S31 capacitive touch can drift >12px during an otherwise ordinary tap.
          * Use an explicit tap-distance limit, without turning swipes into taps. */
         controls_visible = !controls_visible;
-        aster_ge_touch(&gfx, 0, 0, width, height);
+        bright_pending = true;
+        /* Control state draws GE commands; pure art goes directly to native
+         * surface_present, so do not enqueue a GE-only repaint for it. */
+        if (controls_visible)
+            aster_ge_touch(&gfx, 0, 0, width, height);
         aster_printf("HiFi cover view=%s ready=%u touch=%d,%d move=%d,%d",
                      controls_visible ? "controls" : "bright", (unsigned)cover_ready(),
                      x, y, dx, dy);
@@ -1830,8 +1863,10 @@ ASTER_APP_EXPORT void aster_app_event(const aster_event_t *event)
         scan_tick();
         lyrics_tick(now);
         paper_tick(now);
-        if (cover_tick(DESIGN) && page == PLAYBACK)
+        if (cover_tick(DESIGN) && page == PLAYBACK) {
+            bright_pending = true;
             dirty = true;
+        }
         uint32_t second = position() / 1000;
         if (visible_second != second) {
             visible_second = second;
@@ -1866,6 +1901,7 @@ ASTER_APP_EXPORT void aster_app_resume(void)
     aster_app_pause();
     paper_invalidate();
     last_poll = 0;
+    bright_pending = true;
     dirty = true;
 }
 
