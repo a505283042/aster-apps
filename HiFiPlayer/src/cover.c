@@ -16,6 +16,7 @@ enum cover_phase { IDLE, SIDECAR, EXTERNAL, EMBEDDED, COPY, DECODE_COPY, JPEG, D
 static enum cover_phase phase, jpeg_fallback;
 static unsigned extension_index;
 static uint32_t remote_revision;
+static bool selected_initialized;
 
 struct picture {
     uint32_t offset, length;
@@ -335,8 +336,9 @@ static bool sidecar(unsigned cap)
 
 void cover_select(const char *track)
 {
-    if (!remote_revision && !strcmp(track, track_path))
+    if (!remote_revision && selected_initialized && !strcmp(track, track_path))
         return;
+    selected_initialized = true;
     remote_revision = 0;
     close_files();
     aster_snprintf(track_path, sizeof(track_path), "%s", track);
@@ -354,6 +356,7 @@ void cover_select_remote(const char *path, uint32_t revision)
     if (remote_revision == revision && !strcmp(path, track_path))
         return;
     close_files();
+    selected_initialized = true;
     aster_snprintf(track_path, sizeof(track_path), "%s", path);
     remote_revision = revision;
     image_w = image_h = 0;
@@ -419,6 +422,10 @@ void cover_close(void)
 {
     close_files();
     phase = IDLE;
+    selected_initialized = false;
+    remote_revision = 0;
+    image_w = image_h = 0;
+    track_path[0] = 0;
 }
 
 bool cover_ready(void)
