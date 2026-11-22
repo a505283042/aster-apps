@@ -210,15 +210,9 @@ static void finish_scan(bool success)
     };
     pending_header.header_crc = ~crc_step(0xffffffffu, &pending_header,
                     sizeof(pending_header) - sizeof(pending_header.header_crc));
-    if (aster_fs_seek(staging, 0, ASTER_FS_SEEK_SET) < 0 ||
-        !write_exact(staging, &pending_header, sizeof(pending_header))) {
-        scan_error = ASTER_EIO;
-        discard_staging();
-        return;
-    }
-    /* Validate the freshly written payload IN SMALL FRAME BUDGETS before
-     * exposing it. This is the S31 temp/final/bak recovery principle,
-     * adapted to Aster's lack of an atomic rename/fsync API. */
+    /* Keep the on-disk header invalid until the full record payload has
+     * been read back and verified. A sudden power loss must never publish
+     * an unverified staging file ahead of the previous good snapshot. */
     verify_bytes = 0;
     verify_crc = 0xffffffffu;
     verifying = true;
@@ -244,6 +238,13 @@ static void verify_tick(void)
     if (verify_bytes != total) return;
     if ((~verify_crc) != pending_header.payload_crc) {
         scan_error = ASTER_ECORRUPT;
+        discard_staging();
+        return;
+    }
+    /* Publish the valid header as the LAST write, after CRC validation. */
+    if (aster_fs_seek(staging, 0, ASTER_FS_SEEK_SET) < 0 ||
+        !write_exact(staging, &pending_header, sizeof(pending_header))) {
+        scan_error = ASTER_EIO;
         discard_staging();
         return;
     }
