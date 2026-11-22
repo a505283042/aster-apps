@@ -90,6 +90,16 @@ class HiFiControlsV1(unittest.TestCase):
         self.assertIn("box(48, 382, 60, 60", playback)
         self.assertIn("box(352, 382, 60, 60", playback)
 
+    def test_artist_field_does_not_substitute_output_status(self):
+        # Some songs lack artist metadata; output status belongs in its
+        # dedicated bottom capsule, never in the artist line at y=61.
+        playback = between("static void playback(void)", "static int next_lyric_group(")
+        self.assertIn("const char *by = artist();", playback)
+        self.assertIn("if (*by)", playback)
+        self.assertIn("text(40, 61, 380, 21, secondary, by, CENTER)", playback)
+        self.assertNotIn("*by ? by : source_label()", playback)
+        self.assertIn("playback_source_indicator(white);", playback)
+
     def test_error_toast_kept_without_permanent_notice_slot(self):
         draw = between("static void draw(uint32_t now)", "static int hit(int x, int y)")
         self.assertIn("if (message[0] &&", draw)
