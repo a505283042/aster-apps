@@ -18,6 +18,8 @@ enum control {
     TOGGLE,
     NEXT,
     DEMO,
+    MODE,
+    MUTE,
     PAGE_PREV,
     PAGE_NEXT,
     TRACK_FIRST
@@ -33,12 +35,12 @@ enum {
     ROW_TOP = 108,
     ROW_H = 57,
     LIBRARY_PAGER = ROW_TOP + ROWS * ROW_H,
-    VOLUME_X = 76,
-    VOLUME_W = 161,
-    VOLUME_Y = 316,
-    PLAY_SEEK_X = 27,
-    PLAY_SEEK_W = 209,
-    PLAY_PROGRESS = 415,
+    VOLUME_X = 123,
+    VOLUME_W = 214,
+    VOLUME_Y = 374,
+    PLAY_SEEK_X = 60,
+    PLAY_SEEK_W = 340,
+    PLAY_PROGRESS = 264,
     PANEL_X = 254,
     PANEL_Y = 301,
     PANEL_W = 184,
@@ -68,10 +70,17 @@ static int left, top;
 static aster_player_info_t player;
 static uint32_t last_poll, visible_second;
 static int volume, library_page, track_count, scan_error;
-static bool dirty, library_scanned;
+static bool dirty, library_scanned, controls_visible = true;
+enum playback_order { ORDER_NORMAL, ORDER_REPEAT, ORDER_SHUFFLE };
+static enum playback_order playback_mode = ORDER_NORMAL;
+static uint32_t shuffle_seed = 0x6b7b3d29;
+static int volume_before_mute = 40;
 static enum page page = PLAYBACK;
 static char tracks[TRACK_LIMIT][248], current_file[256], queued_file[256];
 static char playing_track[sizeof(current_file)];
+static char selected_file[sizeof(current_file)];
+static const char track_kv_key[] = "last_track";
+static const char mode_kv_key[] = "play_mode";
 static bool start_busy;
 static uint32_t start_retry_until;
 static char message[128];
@@ -281,26 +290,46 @@ static bool numeric_title(const char *value)
     return !*value;
 }
 
+/* This path is the page selection, not an instruction to start audio.
+ * In particular, reopening the APP does not stop a running background player. */
+static bool local_active(void)
+{
+    return player.mode == ASTER_PLAYER_LOCAL &&
+           (player.state == ASTER_PLAYER_PLAYING || player.state == ASTER_PLAYER_PAUSED ||
+            player.state == ASTER_PLAYER_OPENING || player.state == ASTER_PLAYER_STOPPING ||
+            player.state == ASTER_PLAYER_ENDED);
+}
+
+static const char *display_track(void)
+{
+    const char *active = sandbox_track(player.path);
+    if (local_active() && *active)
+        return active;
+    return selected_file[0] ? selected_file : active;
+}
+
 static const char *title(char name[256])
 {
     if (bluetooth_input())
         return *player.title ? player.title : "等待手机播放";
-    if (*lyrics.title && !numeric_title(lyrics.title) &&
-        !strcmp(lyric_track, sandbox_track(player.path)))
+    const char *path = display_track();
+    if (*lyrics.title && !numeric_title(lyrics.title) && !strcmp(lyric_track, path))
         return lyrics.title;
-    if (!strcmp(sandbox_track(player.path), "/assets/audio/demo.flac"))
+    if (!strcmp(path, "/assets/audio/demo.flac"))
         return "试听示例";
-    if (*player.path) {
-        display_name(player.path, name);
+    if (*path) {
+        display_name(path, name);
         return name;
     }
-    return "选择一首音乐";
+    return library_scanned && !track_count ? "尚无本地歌曲" : "正在读取曲库";
 }
 
 static const char *artist(void)
 {
-    if (!bluetooth_input() && *lyrics.artist && !strcmp(lyric_track, sandbox_track(player.path)))
+    if (!bluetooth_input() && *lyrics.artist && !strcmp(lyric_track, display_track()))
         return lyrics.artist;
+    if (!bluetooth_input() && !local_active())
+        return "";
     return *player.artist ? player.artist : player.album;
 }
 
@@ -341,6 +370,37 @@ static int control(uint32_t command, uint32_t value, const char *path)
     return report_control(player_command(command, value, path));
 }
 
+/* Persist a real local-library selection independently from player state.
+ * The codec service remains untouched: selecting artwork never starts playback. */
+static void select_track(const char *path)
+{
+    const char *name = sandbox_track(path);
+    if (strncmp(name, "/music/", 7) || !*format(name) ||
+        strlen(name) >= sizeof(selected_file) || !strcmp(name, selected_file))
+        return;
+    aster_snprintf(selected_file, sizeof(selected_file), "%s", name);
+    int rc = aster_kv_set(track_kv_key, sizeof(track_kv_key) - 1,
+                          selected_file, strlen(selected_file) + 1);
+    if (rc < 0)
+        aster_errfmt("HiFi save track %d", rc);
+    dirty = true;
+}
+
+static void settle_scan_selection(void)
+{
+    if (!library_scanned || !track_count || bluetooth_input())
+        return;
+    for (int i = 0; i < track_count; i++) {
+        char path[256];
+        aster_snprintf(path, sizeof(path), "/music/%s", tracks[i]);
+        if (!strcmp(path, selected_file))
+            return;
+    }
+    char first[256];
+    aster_snprintf(first, sizeof(first), "/music/%s", tracks[0]);
+    select_track(first);
+}
+
 static void scan_close(void)
 {
     if (directory)
@@ -370,13 +430,20 @@ static void scan_tick(void)
             scan_error = n;
             scan_close();
             library_scanned = true;
+            settle_scan_selection();
         } else if (!is_dir && (size_t)n < sizeof(tracks[0])) {
             name[n] = 0;
             if (*format(name)) {
                 memcpy(tracks[track_count++], name, n + 1);
+                if (!selected_file[0] && !bluetooth_input()) {
+                    char first[256];
+                    aster_snprintf(first, sizeof(first), "/music/%s", name);
+                    select_track(first);
+                }
                 if (track_count == TRACK_LIMIT) {
                     scan_close();
                     library_scanned = true;
+                    settle_scan_selection();
                 }
             }
         }
@@ -542,7 +609,7 @@ static void lyrics_read(void)
 static void sync_media(void)
 {
     if (!bluetooth_input()) {
-        const char *path = sandbox_track(player.path);
+        const char *path = display_track();
         lyrics_track(path);
         cover_select(path);
         live_scene = 0;
@@ -744,8 +811,9 @@ static const char *playback_state(void)
 
 static void frame_chrome(void)
 {
-    if (page != PLAYBACK)
-        aster_ge_clear(&gfx, background);
+    if (page == PLAYBACK)
+        return; /* No close X over either full-screen artwork state. */
+    aster_ge_clear(&gfx, background);
     if (page == LYRICS)
         return;
     if (page == LIBRARY) {
@@ -1226,7 +1294,7 @@ static int current_index(void)
 {
     if (bluetooth_input())
         return -1;
-    const char *path = sandbox_track(player.path[0] ? player.path : current_file);
+    const char *path = display_track();
     if (strncmp(path, "/music/", 7))
         return -1;
     for (int i = 0; i < track_count; i++)
@@ -1327,7 +1395,7 @@ static int hit(int x, int y)
 {
     if (page == PAPER)
         return NONE;
-    if (page != LYRICS && y >= 4 && y < HEADER_END && x >= 378 && x < DESIGN)
+    if (page == LIBRARY && y >= 4 && y < HEADER_END && x >= 378 && x < DESIGN)
         return CLOSE;
     if (page == LIBRARY) {
         if (y >= HEADER_END && y < ROW_TOP && x >= 288 && x < DESIGN)
@@ -1342,20 +1410,20 @@ static int hit(int x, int y)
     }
     if (page == LYRICS && can_seek() && y >= LYRIC_SEEK_TOP && y < CONTENT_END)
         return SEEK;
-    if (page == PLAYBACK) {
-        if (x >= 19 && x < PANEL_X - 7) {
-            if (y >= VOLUME_Y - 20 && y < VOLUME_Y + 20)
-                return VOLUME;
-            if (can_seek() && y >= PLAY_PROGRESS - 25 && y < PLAY_PROGRESS + 25)
-                return SEEK;
-        }
-        if (x >= STEP_X && x < STEP_X + STEP_W) {
-            if (y >= STEP_UP && y < STEP_UP + STEP_H)
-                return PREVIOUS;
-            if (y >= STEP_DOWN && y < STEP_DOWN + STEP_H)
-                return NEXT;
-        }
-        if (x >= TOGGLE_X && x < TOGGLE_X + TOGGLE_W && y >= STEP_UP && y < STEP_DOWN + STEP_H)
+    if (page == PLAYBACK && controls_visible) {
+        if (x >= 123 && x < 337 && y >= 360 && y < 397)
+            return VOLUME;
+        if (can_seek() && x >= 48 && x < 412 && y >= 249 && y < 289)
+            return SEEK;
+        if (x >= 48 && x < 108 && y >= 346 && y < 406)
+            return MODE;
+        if (x >= 86 && x < 206 && y >= 315 && y < 347)
+            return MUTE;
+        if (x >= 95 && x < 169 && y >= 157 && y < 231)
+            return PREVIOUS;
+        if (x >= 291 && x < 365 && y >= 157 && y < 231)
+            return NEXT;
+        if (x >= 183 && x < 277 && y >= 147 && y < 241)
             return TOGGLE;
     }
     return NONE;
@@ -1366,7 +1434,7 @@ static bool page_swipe_area(int y)
     if (page == PAPER)
         return y >= 24 && y < DESIGN - 24;
     if (page == PLAYBACK)
-        return y >= 24 && y < PANEL_Y - 5;
+        return y >= 24 && y < 320;
     return y >= HEADER_END && y < (page == LYRICS ? LYRIC_SEEK_TOP : LIBRARY_PAGER);
 }
 
@@ -1410,7 +1478,19 @@ static int automatic_next(void)
         return -1;
     playing_track[0] = 0;
     int index = current_index();
-    return index >= 0 && track_count > 1 && scan_error >= 0 ? (index + 1) % track_count : -1;
+    if (index < 0 || scan_error < 0)
+        return -1;
+    if (playback_mode == ORDER_REPEAT)
+        return index;
+    if (track_count < 2)
+        return -1;
+    if (playback_mode == ORDER_SHUFFLE) {
+        shuffle_seed ^= shuffle_seed << 13;
+        shuffle_seed ^= shuffle_seed >> 17;
+        shuffle_seed ^= shuffle_seed << 5;
+        return (index + 1 + (shuffle_seed % (track_count - 1))) % track_count;
+    }
+    return (index + 1) % track_count;
 }
 
 static void start_queued(uint32_t now)
@@ -1428,6 +1508,7 @@ static void start_queued(uint32_t now)
     if (result >= 0) {
         aster_snprintf(current_file, sizeof(current_file), "%s", queued_file);
         aster_snprintf(playing_track, sizeof(playing_track), "%s", queued_file);
+        select_track(queued_file);
     } else {
         report_control(result);
     }
@@ -1445,6 +1526,7 @@ static void queue_track(const char *path)
     playing_track[0] = 0;
     start_busy = false;
     aster_snprintf(queued_file, sizeof(queued_file), "%s", path);
+    select_track(path);
     if (media_in_use() && player.state != ASTER_PLAYER_STOPPING &&
         control(ASTER_PLAYER_STOP, 0, NULL) < 0)
         queued_file[0] = 0;
@@ -1476,6 +1558,21 @@ static void activate(int id)
     case DEMO:
         queue_track("/assets/audio/demo.flac");
         break;
+    case MODE:
+        playback_mode = (enum playback_order)((playback_mode + 1) % 3);
+        {
+            uint32_t saved = playback_mode;
+            aster_kv_set(mode_kv_key, sizeof(mode_kv_key) - 1, &saved, sizeof(saved));
+        }
+        break;
+    case MUTE:
+        if (volume) {
+            volume_before_mute = volume;
+            aster_audio_set_volume(0);
+        } else {
+            aster_audio_set_volume(volume_before_mute ? volume_before_mute : 40);
+        }
+        break;
     case PAGE_PREV:
         change_library_page(-1);
         break;
@@ -1487,10 +1584,14 @@ static void activate(int id)
             const char *track = sandbox_track(player.path);
             if (*track)
                 queue_track(track);
+            else if (selected_file[0])
+                queue_track(selected_file);
             else if (current_file[0])
                 queue_track(current_file);
+            else if (track_count)
+                play_index(0);
             else
-                set_page(LIBRARY);
+                notice("music 目录中没有歌曲");
         } else if (player.state == ASTER_PLAYER_PLAYING)
             control(ASTER_PLAYER_PAUSE, 0, NULL);
         else
@@ -1504,7 +1605,7 @@ static void activate(int id)
             int index = current_index();
             play_index(index < 0 ? 0 : (index + (id == NEXT ? 1 : track_count - 1)) % track_count);
         } else
-            set_page(LIBRARY);
+            notice("music 目录中没有歌曲");
         break;
     default:
         if (id >= TRACK_FIRST && id < TRACK_FIRST + ROWS)
@@ -1598,6 +1699,9 @@ static void touch(const aster_event_t *event)
         } else {
             scroll_plain((dy < 0 ? 1 : -1) * clamp((ay + 18) / 36, 1, 12));
         }
+    } else if (!finger.moved && page == PLAYBACK && id == NONE && hit(x, y) == NONE) {
+        /* A true background tap switches between exactly two home states. */
+        controls_visible = !controls_visible;
     } else if (!finger.moved && id != NONE && hit(x, y) == id)
         activate(id);
     dirty = true;
@@ -1676,6 +1780,21 @@ ASTER_APP_EXPORT int aster_app_init(void)
     if (result < 0)
         return result;
     aster_ge_init(&gfx, surface, width, height, commands, 160, arena, sizeof(arena));
+    /* Saved selection survives APP upgrades and does not trigger playback. */
+    int saved_len = aster_kv_get(track_kv_key, sizeof(track_kv_key) - 1,
+                                 selected_file, sizeof(selected_file));
+    if (saved_len <= 0 || saved_len >= (int)sizeof(selected_file) ||
+        selected_file[saved_len - 1] != 0 ||
+        strncmp(selected_file, "/music/", 7) || !*format(selected_file))
+        selected_file[0] = 0;
+    uint32_t saved_mode = 0;
+    if (aster_kv_get(mode_kv_key, sizeof(mode_kv_key) - 1, &saved_mode,
+                     sizeof(saved_mode)) == (int)sizeof(saved_mode) && saved_mode < 3)
+        playback_mode = (enum playback_order)saved_mode;
+    shuffle_seed ^= aster_time_now_ms();
+    if (local_active() && !strncmp(sandbox_track(player.path), "/music/", 7))
+        select_track(player.path);
+    controls_visible = true;
     scan_start();
     automatic_next();
     sync_media();
@@ -1697,7 +1816,7 @@ ASTER_APP_EXPORT void aster_app_event(const aster_event_t *event)
         scan_tick();
         lyrics_tick(now);
         paper_tick(now);
-        if (cover_tick(sx(208)) && page == PLAYBACK)
+        if (cover_tick(DESIGN) && page == PLAYBACK)
             dirty = true;
         uint32_t second = position() / 1000;
         if (visible_second != second) {
