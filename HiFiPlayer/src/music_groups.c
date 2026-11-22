@@ -43,7 +43,7 @@ static uint16_t selected_tracks[HIFI_CATALOG_TRACK_MAX];
 static uint32_t artist_count, album_count, decade_count;
 static uint32_t processed, expected_count, expected_generation, errors;
 static uint32_t selected_count, last_tick;
-static bool ready, blocked;
+static bool ready, blocked, gc_save_pending;
 
 /* V1 cached group snapshot. All on-disk structures are versioned and
  * validated before publication. Never overwrite a previous generation's
@@ -142,6 +142,7 @@ static void gc_reset_groups(void)
     memset(artist_slots,0,sizeof(artist_slots));
     memset(album_slots,0,sizeof(album_slots));
     ready=blocked=false;
+    gc_save_pending=false;
 }
 static void gc_discard(bool erase)
 {
@@ -335,9 +336,15 @@ static void gc_verify_tick(void)
         return;
     }
     gc_close();
+    gc_save_pending=false;
     gc_mode=GC_IDLE;
     aster_printf("HiFi groups cache committed tracks=%u gen=%u",
                  expected_count,expected_generation);
+}
+void hifi_groups_close(void)
+{
+    gc_close();
+    gc_mode=GC_IDLE;
 }
 void hifi_groups_invalidate_cache(void)
 {
@@ -449,12 +456,21 @@ void hifi_groups_tick(bool playback_active)
     if (gc_mode==GC_READ) {gc_restore_tick();return;}
     if (gc_mode==GC_WRITE) {if(!playback_active)gc_write_tick();return;}
     if (gc_mode==GC_VERIFY) {if(!playback_active)gc_verify_tick();return;}
+    if (gc_save_pending && ready && !playback_active) {
+        gc_save_pending=false;
+        gc_begin_save();
+        return;
+    }
     if (ready||blocked)return;
     if (processed>=expected_count) {
         ready=true;
         aster_printf("HiFi tags grouped artists=%u albums=%u decades=%u files=%u errors=%u",
                      artist_count,album_count,decade_count,processed,errors);
-        if (!playback_active) gc_begin_save();
+        gc_save_pending=true;
+        if (!playback_active) {
+            gc_save_pending=false;
+            gc_begin_save();
+        }
         return;
     }
     uint32_t now=aster_time_now_ms();
