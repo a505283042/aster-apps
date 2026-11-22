@@ -98,3 +98,49 @@ Hi-Fi 播放器 0.5.0-alpha.1，按 FAKE POD NANO PRO 的 460×460 方屏设计�
 - 重启曲库扫描完成后先尝试加载匹配代际的 Group 缓存，再决定是否重新读取 MP3/FLAC 标签。相同路径和文件大小但标签原地改变的情形仍受 Catalog signature 检测限制，可通过 APP 顶栏二次确认的「重扫」强制删除 Catalog 和 Group 双份缓存并重建。
 - 当前播放音乐时不启动 Group 缓存写入/校验；如果扫描刚好完成于播放中，则写盘推迟到播放暂停或结束后，避免额外 TF 卡写流量干扰音频。
 - **版本状态**：alpha.4 是独立实验版本，未运行 Aster SDK 编译或实机测试。请先编译，确保输出包含 `v0.5.0-alpha.4`，再验证设备启动日志 `HiFi groups cache committed` 与二次启动 `HiFi groups restored cached`。保留已验证的 alpha.1 稳定回退包。
+
+
+## 0.5.0-alpha.5：艺术歌词字库共享，瘦身 APP 安装包
+
+**已经过实机验证的 USB MSC 模式可用**：Windows 识别卡、读写、弹出后返回设备桌面、APP 安装启动四项均由使用者确认。
+
+本版不再把大型艺术歌词 `paper-serif.bin`、`paper-bold.bin` 装入 `.ast`（原来分别约 2.52 MB 和 1.77 MB），改为共享资源 **`/sd/aster/shared/hifi/fonts/`**。采用 SDK 官方支持的 `sd` 权限访问，首次从 SD 读取，字形加载和动画方式保持原状。为旧胖包保留 `/assets/text/` 回退路径；本版瘦包不含这两个备份文件，因此 **安装 alpha.5 前必须先把字库放到 SD 指定目录**。字库路径与传统 S31/FakePod 旧库索引无关。
+
+### 一次性迁移（Windows USB MSC）
+
+连接电脑进入 USB 读卡器模式，安全地得到某个盘符（示例 `E:`）：
+
+```powershell
+$sd = "E:"
+$source = "D:\ESP32\aster-apps\HiFiPlayer\text"
+$dest = Join-Path $sd "aster\shared\hifi\fonts"
+New-Item -ItemType Directory -Force -Path $dest | Out-Null
+Copy-Item (Join-Path $source "paper-serif.bin") -Destination $dest -Force
+Copy-Item (Join-Path $source "paper-bold.bin") -Destination $dest -Force
+Copy-Item (Join-Path $source "paper-serif-OFL.txt") -Destination $dest -Force
+Copy-Item (Join-Path $source "paper-bold-OFL.txt") -Destination $dest -Force
+Get-Item (Join-Path $dest "paper-serif.bin"), (Join-Path $dest "paper-bold.bin") |
+    Select-Object Name,Length
+```
+
+预期共享 ALV1 文件大小（来自当前仓库资源版本）：`paper-serif.bin` **2,518,748 B**；`paper-bold.bin` **1,766,506 B**。源和目标可分别用 `Get-FileHash -Algorithm SHA256` 验证相同。请把许可证 `paper-*-OFL.txt` 同目录拷贝保存，避免单独分发字库时丢失许可信息。
+
+完成拷贝、Windows 安全弹出且设备恢复正常模式后，更新源码并编译：
+
+```powershell
+. "D:\ESP32\aster-sdk-4.5.0\env.ps1"
+cd D:\ESP32\aster-apps
+git pull --ff-only origin feat/hifi-s31-full-port
+aster build HiFiPlayer --target riscv --aot
+aster verify HiFiPlayer/dist/riscv/aster.hifi.ast
+```
+
+随后再次进入 USB 读卡器模式，复制新 `HiFiPlayer/dist/riscv/aster.hifi.ast` 到 `<盘符>:\aster\install\aster.hifi.ast`，安全弹出后通过设备 shell `aster app install /SD:/aster/install/aster.hifi.ast` 安装。
+
+### 安全和兼容性
+
+- 无需重新烧录固件，不改播放器音频/封面/动态歌词算法、旧索引格式或现有 `/data` 内容。
+- 正常外置字体优先从共享目录读取。若旧安装包还保留字体资源，会在共享字体不可用时尝试 /assets 路径。瘦包没有该回退内容；缺失时会显示正常的空字形/降级歌词并在串口打印 `HiFi paper font unavailable`，不应影响系统音频。
+- 读入共享字体时，校验 ALV1 魔数、80 像素单元、字形索引范围、排序以及包偏移与总文件长度；允许空白字符使用零长度轮廓数据。
+- 目前仍随包保留演示 FLAC（约 0.51 MB）、占位封面（约 0.077 MB）和 GBK 表（约 0.048 MB）。预期安装包总量从约 5.44 MB 降为约 1.15 MB，最终以你实际 `aster verify` 输出为准。
+- **未经过当前用户机器的 SDK 编译／新版本的 S31 实机测试**。务必先复制字体、确认 Hash 一致，再安装 alpha.5；保留上一个能够正常使用的 alpha.4 安装包作为回退。
