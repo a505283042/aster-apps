@@ -19,7 +19,7 @@ def section(start, end):
 
 class StageBCover(unittest.TestCase):
     def test_optional_v2_no_new_required_import(self):
-        self.assertIn('version = "0.5.0-alpha.9"', MANIFEST)
+        self.assertIn('version = "0.5.0-alpha.10"', MANIFEST)
         self.assertIn("sizeof(hifi_cover_hw_args_t) == 64", COVER)
         self.assertIn("sizeof(aster_img_render_args_t) == 40", COVER)
         hw = section("static bool hardware_jpeg(", "static bool begin_jpeg(")
