@@ -1397,7 +1397,7 @@ static void draw(uint32_t now)
     case PAPER:
         break;
     }
-    if (message[0]) {
+    if (message[0] && !(page == PLAYBACK && !controls_visible)) {
         box(32, 271, 396, 47, 11, panel, false);
         box(32, 271, 396, 47, 11, border, true);
         text(44, 283, 372, 18, ink, message, CENTER);
@@ -1713,12 +1713,15 @@ static void touch(const aster_event_t *event)
         } else {
             scroll_plain((dy < 0 ? 1 : -1) * clamp((ay + 18) / 36, 1, 12));
         }
-    } else if (!finger.moved && page == PLAYBACK && id == NONE && hit(x, y) == NONE) {
-        /* A true background tap switches between exactly two home states. */
+    } else if (page == PLAYBACK && id == NONE && hit(x, y) == NONE &&
+               ax <= 32 && ay <= 32) {
+        /* S31 capacitive touch can drift >12px during an otherwise ordinary tap.
+         * Use an explicit tap-distance limit, without turning swipes into taps. */
         controls_visible = !controls_visible;
         aster_ge_touch(&gfx, 0, 0, width, height);
-        aster_printf("HiFi cover view=%s cover_ready=%u",
-                     controls_visible ? "controls" : "bright", (unsigned)cover_ready());
+        aster_printf("HiFi cover view=%s ready=%u touch=%d,%d move=%d,%d",
+                     controls_visible ? "controls" : "bright", (unsigned)cover_ready(),
+                     x, y, dx, dy);
     } else if (!finger.moved && id != NONE && hit(x, y) == id)
         activate(id);
     dirty = true;
@@ -1810,6 +1813,7 @@ ASTER_APP_EXPORT int aster_app_init(void)
     sync_media();
     imu_retry_at = aster_time_now_ms();
     aster_app_set_framerate(30);
+    aster_printf("HiFi home ready: tap empty art to toggle original/dim");
     dirty = true;
     aster_printf("HiFi init %ux%u caps=%u", width, height, player.capabilities);
     return 0;
