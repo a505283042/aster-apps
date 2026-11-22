@@ -10,6 +10,16 @@
 #include "paper.h"
 #include "shake.h"
 
+/* Optional ABI 4.5 extension; the installed SDK 4.5.0 can build this APP.
+ * These constants match aster-firmware contract/include/aster/player.h.
+ * Capability-gate all uses so alpha.6 still runs safely on older firmware. */
+#ifndef ASTER_PLAYER_CAP_QUEUE_MODE
+#define ASTER_PLAYER_CAP_QUEUE_MODE 256u
+#endif
+#ifndef ASTER_PLAYER_SET_QUEUE_MODE
+#define ASTER_PLAYER_SET_QUEUE_MODE 14u
+#endif
+
 enum page { LYRICS, PLAYBACK, LIBRARY, PAPER };
 
 enum control {
@@ -90,8 +100,18 @@ static int library_group_mode(void)
 static bool dirty, library_scanned, controls_visible = true;
 /* Full-art page uses an explicit native surface present, never a zero-command GE flush. */
 static bool bright_pending = true;
-enum playback_order { ORDER_NORMAL, ORDER_REPEAT, ORDER_SHUFFLE };
-static enum playback_order playback_mode = ORDER_NORMAL;
+enum playback_order {
+    ORDER_SEQUENCE, ORDER_REPEAT_ALL, ORDER_REPEAT_ONE, ORDER_SHUFFLE
+};
+static enum playback_order playback_mode = ORDER_REPEAT_ALL;
+static bool firmware_queue_mode(void)
+{
+    return (player.capabilities & ASTER_PLAYER_CAP_QUEUE_MODE) != 0;
+}
+static bool firmware_auto_next(void)
+{
+    return (player.capabilities & ASTER_PLAYER_CAP_AUTO_NEXT) != 0;
+}
 static uint32_t shuffle_seed = 0x6b7b3d29;
 static enum page page = PLAYBACK;
 static char current_file[256], queued_file[256];
@@ -102,7 +122,7 @@ static char track_buffer[HIFI_CATALOG_PATH_MAX];
 static char playing_track[sizeof(current_file)];
 static char selected_file[sizeof(current_file)];
 static const char track_kv_key[] = "last_track";
-static const char mode_kv_key[] = "play_mode";
+static const char mode_kv_key[] = "play_mode_v2";
 static bool start_busy;
 static uint32_t start_retry_until;
 static char message[128];
@@ -932,8 +952,8 @@ static void fallback_art(uint16_t base)
     circle(174, 105, 8, RGB(195, 231, 250));
 }
 
-/* Three geometric transport-mode icons: playlist, repeat-one and shuffle.
- * The stored mode continues to determine natural-end playback order. */
+/* Four modes. A shaded label indicates the firmware is authoritative.
+ * Bluetooth input remains controlled by the connected phone. */
 static void mode_icon(uint16_t white)
 {
     if (bluetooth_input()) {
@@ -952,8 +972,10 @@ static void mode_icon(uint16_t white)
         triangle(90, 364, 99, 369, 90, 374, white);
         line(94, 384, 61, 384, white);
         triangle(65, 379, 56, 384, 65, 389, white);
-        if (playback_mode == ORDER_REPEAT)
+        if (playback_mode == ORDER_REPEAT_ONE)
             text(68, 367, 22, 16, white, "1", CENTER);
+        else if (playback_mode == ORDER_SEQUENCE)
+            text(68, 367, 22, 16, white, "→", CENTER);
     }
 }
 
@@ -1023,8 +1045,10 @@ static void playback(void)
     box(48, 346, 66, 77, 18, RGB(56, 62, 72), false);
     mode_icon(white);
     const char *mode_name = bluetooth_input() ? "不可用" :
+                            firmware_auto_next() && !firmware_queue_mode() ? "固件" :
                             playback_mode == ORDER_SHUFFLE ? "随机" :
-                            playback_mode == ORDER_REPEAT ? "单曲" : "顺序";
+                            playback_mode == ORDER_REPEAT_ONE ? "单曲" :
+                            playback_mode == ORDER_REPEAT_ALL ? "全部" : "顺序";
     text(48, 399, 66, 17, white, mode_name, CENTER);
 }
 
@@ -1664,6 +1688,10 @@ static bool media_in_use(void)
  * library track we actually saw running, or successfully started ourselves. */
 static int automatic_next(void)
 {
+    /* System owner is exclusive: never schedule a second EOF start.
+     * The old firmware's root-only handler is intentionally not duplicated. */
+    if (firmware_auto_next())
+        return -1;
     const char *path = sandbox_track(player.path);
     if (player.mode != ASTER_PLAYER_LOCAL || queued_file[0] || strncmp(path, "/music/", 7)) {
         playing_track[0] = 0;
@@ -1687,9 +1715,11 @@ static int automatic_next(void)
     int index = hifi_catalog_find(path + 7);
     if (index < 0 || (scan_error < 0 && !hifi_catalog_status().has_saved))
         return -1;
-    if (playback_mode == ORDER_REPEAT)
+    if (playback_mode == ORDER_REPEAT_ONE)
         return index;
-    if (track_count < 2)
+    if (playback_mode == ORDER_SEQUENCE && index + 1 >= track_count)
+        return -1;
+    if (track_count < 2 && playback_mode == ORDER_SHUFFLE)
         return -1;
     if (playback_mode == ORDER_SHUFFLE) {
         shuffle_seed ^= shuffle_seed << 13;
@@ -1810,10 +1840,25 @@ static void activate(int id)
             notice("手机循环模式由手机播放器管理");
             break;
         }
-        playback_mode = (enum playback_order)((playback_mode + 1) % 3);
+        if (firmware_auto_next() && !firmware_queue_mode()) {
+            notice("当前固件尚不支持四种后台模式");
+            break;
+        }
         {
-            uint32_t saved = playback_mode;
-            aster_kv_set(mode_kv_key, sizeof(mode_kv_key) - 1, &saved, sizeof(saved));
+            uint32_t target = ((uint32_t)playback_mode + 1u) % 4u;
+            if (firmware_queue_mode()) {
+                /* One owner: do not persist a second APP-specific mode. */
+                if (control(ASTER_PLAYER_SET_QUEUE_MODE, target, NULL) < 0)
+                    break;
+            } else {
+                /* Legacy firmware without AUTO_NEXT only: APP owns EOF. */
+                if (aster_kv_set(mode_kv_key, sizeof(mode_kv_key) - 1,
+                                 &target, sizeof(target)) < 0) {
+                    notice("无法保存播放模式");
+                    break;
+                }
+            }
+            playback_mode=(enum playback_order)target;
         }
         break;
     case PAGE_PREV:
@@ -1844,6 +1889,8 @@ static void activate(int id)
     case NEXT:
         if (bluetooth_input()) {
             control(id == PREVIOUS ? ASTER_PLAYER_PREVIOUS : ASTER_PLAYER_NEXT, 0, NULL);
+        } else if (firmware_queue_mode()) {
+            (void)control(id == PREVIOUS ? ASTER_PLAYER_PREVIOUS : ASTER_PLAYER_NEXT, 0, NULL);
         } else if (track_count) {
             int index = current_index();
             play_index(index < 0 ? 0 : (index + (id == NEXT ? 1 : track_count - 1)) % track_count);
@@ -2014,6 +2061,13 @@ static void poll(uint32_t now)
             finger.control = NONE;
         }
         player = next;
+        if (firmware_queue_mode() && player.reserved[3] <= ORDER_SHUFFLE) {
+            enum playback_order reported=(enum playback_order)player.reserved[3];
+            if(playback_mode!=reported) {
+                playback_mode=reported;
+                dirty=true;
+            }
+        }
         if (seeking == SEEK_WAIT) {
             uint32_t delta = player.position_ms > seek_position
                                  ? player.position_ms - seek_position
@@ -2068,9 +2122,18 @@ ASTER_APP_EXPORT int aster_app_init(void)
         strncmp(selected_file, "/music/", 7) || !*format(selected_file))
         selected_file[0] = 0;
     uint32_t saved_mode = 0;
-    if (aster_kv_get(mode_kv_key, sizeof(mode_kv_key) - 1, &saved_mode,
-                     sizeof(saved_mode)) == (int)sizeof(saved_mode) && saved_mode < 3)
-        playback_mode = (enum playback_order)saved_mode;
+    if (firmware_queue_mode()) {
+        playback_mode=player.reserved[3] <= ORDER_SHUFFLE ?
+                      (enum playback_order)player.reserved[3] : ORDER_REPEAT_ALL;
+    } else if (firmware_auto_next()) {
+        /* Old firmware always loops the /music root; do not pretend UI
+         * can change its system-owned playback order. */
+        playback_mode=ORDER_REPEAT_ALL;
+    } else if (aster_kv_get(mode_kv_key, sizeof(mode_kv_key) - 1, &saved_mode,
+                            sizeof(saved_mode)) == (int)sizeof(saved_mode) &&
+               saved_mode <= ORDER_SHUFFLE) {
+        playback_mode=(enum playback_order)saved_mode;
+    }
     shuffle_seed ^= aster_time_now_ms();
     if (local_active() && !strncmp(sandbox_track(player.path), "/music/", 7))
         select_track(player.path);
