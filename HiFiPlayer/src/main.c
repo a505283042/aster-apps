@@ -950,7 +950,8 @@ static void playback(void)
     /* Original bottom-row anchors: mode x48, volume x123..337, mute/status.
      * Cassette and a second song-select start page are intentionally absent. */
     box(48, 346, 60, 60, 18, RGB(56, 62, 72), false);
-    const char *mode_name = playback_mode == ORDER_SHUFFLE ? "随机" :
+    const char *mode_name = bluetooth_input() ? "X" :
+                            playback_mode == ORDER_SHUFFLE ? "随机" :
                             playback_mode == ORDER_REPEAT ? "单曲" : "顺序";
     text(48, 362, 60, 21, white, mode_name, CENTER);
     box(123, VOLUME_Y, VOLUME_W, 9, 5, bar, false);
@@ -1585,6 +1586,10 @@ static void activate(int id)
         queue_track("/assets/audio/demo.flac");
         break;
     case MODE:
+        if (bluetooth_input()) {
+            notice("手机循环模式由手机播放器管理");
+            break;
+        }
         playback_mode = (enum playback_order)((playback_mode + 1) % 3);
         {
             uint32_t saved = playback_mode;
