@@ -7,6 +7,7 @@
 #include "music_catalog.h"
 #include "music_browser.h"
 #include "music_groups.h"
+#include "music_tags.h"
 #include "paper.h"
 #include "shake.h"
 
@@ -131,6 +132,11 @@ static char selected_file[sizeof(current_file)];
  * handoff; selected_file is the last explicit LIBRARY choice, not the track
  * currently playing after a global NEXT/PREV or background auto-next. */
 static char confirmed_media_track[sizeof(current_file)];
+/* One current-song tag record, acquired while audio is idle. The grouped
+ * HIF2 artist cache is the primary source during playback, with no SD I/O. */
+static char selected_artist_path[sizeof(current_file)];
+static char selected_artist[HIFI_TAG_TEXT_MAX];
+static char indexed_artist[HIFI_TAG_TEXT_MAX];
 static const char track_kv_key[] = "last_track";
 static const char mode_kv_key[] = "play_mode_v2";
 static bool start_busy;
@@ -182,6 +188,7 @@ static uint32_t seek_position, seek_deadline;
 
 /* Global HIF2 catalog ID, not the current library filter or folder row. */
 static int current_index(void);
+static bool media_in_use(void);
 
 static int sx(int x)
 {
@@ -400,13 +407,44 @@ static const char *title(char name[256])
     return library_scanned && !track_count ? "尚无本地歌曲" : "正在读取曲库";
 }
 
+/* Preserve FakePod_S31 artist precedence: file's TPE1 / Vorbis ARTIST,
+ * album-artist fallback, then LRC artist and lastly remote AVRCP metadata.
+ * Local media snapshots do not contain ID3/Vorbis tags, so asking only
+ * player.artist was always empty even when the song was correctly tagged. */
 static const char *artist(void)
 {
-    if (!bluetooth_input() && *lyrics.artist && !strcmp(lyric_track, display_track()))
+    if (bluetooth_input())
+        return *player.artist ? player.artist : player.album;
+    const char *path=display_track();
+    if (!strncmp(path,"/music/",7)) {
+        int index=current_index();
+        if (index>=0 && hifi_groups_track_artist((uint32_t)index,
+                                                indexed_artist,sizeof(indexed_artist)))
+            return indexed_artist;
+        if (!strcmp(path,selected_artist_path) && *selected_artist)
+            return selected_artist;
+    }
+    if (*lyrics.artist && !strcmp(lyric_track,path))
         return lyrics.artist;
-    if (!bluetooth_input() && !local_active())
-        return "";
     return *player.artist ? player.artist : player.album;
+}
+
+/* This probe is never called while playing / paused / opening. It reads a
+ * single MP3/FLAC tag before our queued PLAY_FILE or while browsing idle.
+ * Automatic NEXT in firmware relies on the already grouped per-track cache. */
+static void cache_artist_when_idle(const char *path)
+{
+    if (!path || strncmp(path,"/music/",7) ||
+        !strcmp(path,selected_artist_path) || media_in_use())
+        return;
+    aster_snprintf(selected_artist_path,sizeof(selected_artist_path),"%s",path);
+    selected_artist[0]=0;
+    hifi_tags_t tags={0};
+    if (hifi_tags_read(path+7,&tags)) {
+        const char *name=tags.artist[0]?tags.artist:tags.album_artist;
+        if (*name) aster_snprintf(selected_artist,sizeof(selected_artist),"%s",name);
+    }
+    dirty=true;
 }
 
 static void notice(const char *value)
@@ -1913,6 +1951,9 @@ static int automatic_next(void)
 
 static void start_queued(uint32_t now)
 {
+    /* The previous decoder has released TF before probing metadata.
+     * This is outside the hot playback path, never every frame. */
+    cache_artist_when_idle(queued_file);
     int result = player_command(ASTER_PLAYER_PLAY_FILE, output(), queued_file);
     /* The old audio worker may briefly be releasing the output after EOF. */
     if (result == ASTER_EBUSY) {
@@ -1971,6 +2012,37 @@ static void play_index(int index)
         return;
     char path[256];
     if (index_path(index, path, sizeof(path))) queue_track(path);
+}
+
+/* The native queue cannot step from IDLE because snapshot.path is empty.
+ * When APP is open and nothing is playing, bootstrap from the selected HIF2
+ * track instead; firmware retains exclusive ownership once playback starts. */
+static void step_idle_library(int direction)
+{
+    if (!hifi_catalog_status().has_saved || track_count<=0) {
+        notice("首次音乐索引完成后才能切歌");
+        return;
+    }
+    int index=current_index();
+    int next=0;
+    if (index>=0) {
+        if (playback_mode==ORDER_SHUFFLE && track_count>1) {
+            shuffle_seed^=shuffle_seed<<13;
+            shuffle_seed^=shuffle_seed>>17;
+            shuffle_seed^=shuffle_seed<<5;
+            next=(index+1+(int)(shuffle_seed%(uint32_t)(track_count-1)))%track_count;
+        } else {
+            next=index+direction;
+            if (next<0 || next>=track_count) {
+                if (playback_mode==ORDER_SEQUENCE) {
+                    notice(direction>0 ? "已到曲库末尾" : "已到曲库开头");
+                    return;
+                }
+                next=next<0 ? track_count-1 : 0;
+            }
+        }
+    }
+    play_index(next);
 }
 
 static void change_library_page(int step)
@@ -2094,6 +2166,8 @@ static void activate(int id)
     case NEXT:
         if (bluetooth_input()) {
             control(id == PREVIOUS ? ASTER_PLAYER_PREVIOUS : ASTER_PLAYER_NEXT, 0, NULL);
+        } else if (!media_in_use()) {
+            step_idle_library(id == NEXT ? 1 : -1);
         } else if (firmware_queue_mode()) {
             (void)control(id == PREVIOUS ? ASTER_PLAYER_PREVIOUS : ASTER_PLAYER_NEXT, 0, NULL);
         } else if (track_count) {
@@ -2357,6 +2431,10 @@ ASTER_APP_EXPORT void aster_app_event(const aster_event_t *event)
         poll(now);
         shake_poll(now);
         scan_tick();
+        /* One-time idle metadata fetch on the saved selection. Never access
+         * TF for song metadata during a playing UI/progress refresh. */
+        if (!bluetooth_input() && !media_in_use() && !queued_file[0])
+            cache_artist_when_idle(display_track());
         uint32_t meta_before=hifi_groups_processed();
         bool meta_was_ready=hifi_groups_ready();
         /* Audio stutter is still under investigation: only perform extra
