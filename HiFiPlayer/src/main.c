@@ -5,6 +5,7 @@
 #include "flac_lyrics.h"
 #include "lrc.h"
 #include "music_catalog.h"
+#include "music_browser.h"
 #include "paper.h"
 #include "shake.h"
 
@@ -18,6 +19,8 @@ enum control {
     TOGGLE,
     NEXT,
     DEMO,
+    LIB_ALL,
+    LIB_FOLDERS,
     MODE,
     PAGE_PREV,
     PAGE_NEXT,
@@ -66,6 +69,8 @@ static int left, top;
 static aster_player_info_t player;
 static uint32_t last_poll, visible_second;
 static int library_page, track_count, scan_error;
+enum library_mode { LIBRARY_ALL_TRACKS, LIBRARY_FOLDER_TREE };
+static enum library_mode library_mode = LIBRARY_ALL_TRACKS;
 static bool dirty, library_scanned, controls_visible = true;
 /* Full-art page uses an explicit native surface present, never a zero-command GE flush. */
 static bool bright_pending = true;
@@ -431,11 +436,20 @@ static void scan_start(void)
     lookup_was_ready = hifi_catalog_lookup_ready();
     /* A cached catalog is immediately browsable while SD scanning continues. */
     if (status.has_saved) settle_scan_selection();
+    if (library_mode == LIBRARY_FOLDER_TREE)
+        hifi_browser_open("");
 }
 
 static void scan_tick(void)
 {
     hifi_catalog_tick();
+    if (page == LIBRARY && library_mode == LIBRARY_FOLDER_TREE) {
+        uint32_t count_before = hifi_browser_count();
+        bool busy_before = hifi_browser_busy();
+        hifi_browser_tick();
+        if (count_before != hifi_browser_count() || busy_before != hifi_browser_busy())
+            dirty = true;
+    }
     hifi_catalog_status_t status = hifi_catalog_status();
     int prior = track_count;
     bool was_scanned = library_scanned;
@@ -832,8 +846,12 @@ static void frame_chrome(void)
         return; /* Both full-cover states are pure album art backgrounds. */
     aster_ge_clear(&gfx, background);
     if (page == LIBRARY) {
-        text(22, 17, 173, 24, ink, "本地曲库", LEFT);
-        text(260, 20, 109, 18, muted, source_label(), RIGHT);
+        if (library_mode == LIBRARY_FOLDER_TREE && hifi_browser_folder()[0]) {
+            text(22, 17, 338, 23, ink, hifi_browser_folder(), LEFT);
+        } else {
+            text(22, 17, 173, 24, ink, "本地曲库", LEFT);
+            text(260, 20, 109, 18, muted, source_label(), RIGHT);
+        }
     }
     /* Lyrics and library share an explicit return-to-player button. */
     box(382, 9, 67, 46, 12, finger.control == BACK ? panel : chrome, false);
@@ -1355,44 +1373,87 @@ static int current_index(void)
     return lookup_index;
 }
 
+static int library_item_count(void)
+{
+    return library_mode == LIBRARY_FOLDER_TREE ? (int)hifi_browser_count() : track_count;
+}
+
 static int page_count(void)
 {
-    return track_count ? (track_count + ROWS - 1) / ROWS : 1;
+    int visible = library_item_count();
+    return visible ? (visible + ROWS - 1) / ROWS : 1;
 }
 
 static void library(void)
 {
     char temp[256];
+    int visible = library_item_count();
     hifi_catalog_status_t catalog = hifi_catalog_status();
-    if (catalog.scanning)
-        aster_snprintf(temp, sizeof(temp), "扫描中 %u / 已索引 %d", catalog.discovered,
-                       track_count);
-    else
-        aster_snprintf(temp, sizeof(temp), "SD / music · %d 首", track_count);
-    text(25, 71, 252, 18, muted, temp, LEFT);
-    box(305, 59, 130, 44, 10, finger.control == DEMO ? rim : panel, false);
-    text(305, 68, 130, 20, gold, "试听示例", CENTER);
+    bool folder_view = library_mode == LIBRARY_FOLDER_TREE;
+
+    /* Aster analogue of S31's persistent top-level browsing scope.
+     * Metadata categories are deliberately not faked from filenames. */
+    box(17, 61, 203, 40, 10, !folder_view ? selected : chrome, false);
+    box(239, 61, 203, 40, 10, folder_view ? selected : chrome, false);
+    aster_snprintf(temp, sizeof(temp), "全部歌曲 %d", track_count);
+    text(25, 68, 188, 19, !folder_view ? gold : ink, temp, CENTER);
+    text(251, 68, 176, 19, folder_view ? gold : ink, "文件夹", CENTER);
+
     int active = current_index();
     for (int row = 0; row < ROWS; row++) {
         int index = library_page * ROWS + row, y = ROW_TOP + row * ROW_H;
-        if (index >= track_count)
+        if (index >= visible)
             break;
-        if (active == index || finger.control == TRACK_FIRST + row)
+
+        const char *filename = "";
+        char meta[32] = "";
+        bool is_folder = false;
+        int track_id = index;
+        hifi_browser_entry_t entry = {0};
+        if (folder_view) {
+            if (!hifi_browser_entry((uint32_t)index, &entry))
+                continue;
+            is_folder = entry.folder;
+            filename = entry.name;
+            if (is_folder)
+                aster_snprintf(meta, sizeof(meta), "%u 首", entry.songs);
+            else {
+                track_id = (int)entry.track_index;
+                aster_snprintf(meta, sizeof(meta), "%s", format(filename));
+            }
+        } else {
+            filename = track_at(index);
+            aster_snprintf(meta, sizeof(meta), "%s", format(filename));
+        }
+
+        if ((active == track_id && !is_folder) || finger.control == TRACK_FIRST + row)
             box(19, y + 2, 422, ROW_H - 5, 10, selected, false);
         else
             line(22, y + ROW_H - 2, 438, y + ROW_H - 2, rail);
-        aster_snprintf(temp, sizeof(temp), "%02d", index + 1);
-        text(33, y + 18, 45, 18, gold, temp, LEFT);
-        const char *entry = track_at(index);
-        display_name(entry, temp);
-        text(77, y + 13, 260, 24, ink, temp, LEFT);
-        text(351, y + 19, 69, 18, muted, format(entry), RIGHT);
+
+        if (is_folder) {
+            text(33, y + 16, 34, 24, gold, ">", CENTER);
+            text(77, y + 13, 266, 23, ink, filename, LEFT);
+        } else {
+            aster_snprintf(temp, sizeof(temp), "%02d", folder_view ? index + 1 : track_id + 1);
+            text(33, y + 18, 45, 18, gold, temp, LEFT);
+            display_name(filename, temp);
+            text(77, y + 13, 260, 24, ink, temp, LEFT);
+        }
+        text(351, y + 19, 70, 18, muted, meta, RIGHT);
     }
-    if (!track_count && library_scanned) {
+
+    if (!visible && !folder_view && !catalog.scanning) {
         text(26, 200, 408, 19, ink,
              scan_error < 0 && scan_error != ASTER_ENOENT ? "无法打开存储卡曲库" : "曲库暂无音乐",
              CENTER);
         text(26, 236, 408, 16, muted, "将 MP3、FLAC 或 WAV 放入 music 目录", CENTER);
+    } else if (folder_view && hifi_browser_error()) {
+        text(26, 200, 408, 19, ink, "文件夹列表读取失败", CENTER);
+    } else if (folder_view && hifi_browser_busy() && !visible) {
+        text(26, 200, 408, 19, muted, "正在整理文件夹...", CENTER);
+    } else if (folder_view && !visible) {
+        text(26, 200, 408, 19, muted, "此文件夹没有音乐", CENTER);
     }
     uint16_t prev = library_page > 0 ? gold : border;
     uint16_t next = library_page + 1 < page_count() ? gold : border;
@@ -1400,7 +1461,10 @@ static void library(void)
     box(316, LIBRARY_PAGER + 6, 126, 47, 10, chrome, false);
     text(18, LIBRARY_PAGER + 17, 126, 20, prev, "上一页", CENTER);
     text(316, LIBRARY_PAGER + 17, 126, 20, next, "下一页", CENTER);
-    aster_snprintf(temp, sizeof(temp), "%d / %d", library_page + 1, page_count());
+    if (folder_view && hifi_browser_busy())
+        aster_snprintf(temp, sizeof(temp), "整理 %d", visible);
+    else
+        aster_snprintf(temp, sizeof(temp), "%d / %d", library_page + 1, page_count());
     text(158, LIBRARY_PAGER + 17, 144, 20, ink, temp, CENTER);
 }
 
@@ -1480,8 +1544,8 @@ static int hit(int x, int y)
         x >= 378 && x < DESIGN)
         return BACK;
     if (page == LIBRARY) {
-        if (y >= HEADER_END && y < ROW_TOP && x >= 288 && x < DESIGN)
-            return DEMO;
+        if (y >= HEADER_END && y < ROW_TOP)
+            return x < 230 ? LIB_ALL : LIB_FOLDERS;
         if (y >= ROW_TOP && y < LIBRARY_PAGER && x >= 8 && x < DESIGN - 8)
             return TRACK_FIRST + (y - ROW_TOP) / ROW_H;
         if (y >= LIBRARY_PAGER && y < CONTENT_END && x >= 0 && x < 150)
@@ -1633,7 +1697,23 @@ static void activate(int id)
 {
     switch (id) {
     case BACK:
-        set_page(PLAYBACK);
+        if (page == LIBRARY && library_mode == LIBRARY_FOLDER_TREE &&
+            hifi_browser_folder()[0]) {
+            hifi_browser_up();
+            library_page = 0;
+        } else
+            set_page(PLAYBACK);
+        break;
+    case LIB_ALL:
+        library_mode = LIBRARY_ALL_TRACKS;
+        library_page = 0;
+        break;
+    case LIB_FOLDERS:
+        if (library_mode != LIBRARY_FOLDER_TREE) {
+            library_mode = LIBRARY_FOLDER_TREE;
+            hifi_browser_open("");
+            library_page = 0;
+        }
         break;
     case DEMO:
         queue_track("/assets/audio/demo.flac");
@@ -1684,8 +1764,32 @@ static void activate(int id)
             notice("music 目录中没有歌曲");
         break;
     default:
-        if (id >= TRACK_FIRST && id < TRACK_FIRST + ROWS)
-            play_index(library_page * ROWS + id - TRACK_FIRST);
+        if (id >= TRACK_FIRST && id < TRACK_FIRST + ROWS) {
+            int position = library_page * ROWS + id - TRACK_FIRST;
+            if (library_mode == LIBRARY_ALL_TRACKS)
+                play_index(position);
+            else {
+                hifi_browser_entry_t entry = {0};
+                if (!hifi_browser_entry((uint32_t)position, &entry)) break;
+                if (!entry.folder) {
+                    play_index((int)entry.track_index);
+                } else {
+                    const char *parent = hifi_browser_folder();
+                    size_t n = strlen(parent), k = strlen(entry.name);
+                    char target[HIFI_CATALOG_PATH_MAX];
+                    if (n + k + (n ? 1u : 0u) >= sizeof(target)) {
+                        notice("文件夹路径过长");
+                        break;
+                    }
+                    if (n)
+                        aster_snprintf(target, sizeof(target), "%s/%s", parent, entry.name);
+                    else
+                        aster_snprintf(target, sizeof(target), "%s", entry.name);
+                    hifi_browser_open(target);
+                    library_page = 0;
+                }
+            }
+        }
         break;
     }
     dirty = true;
