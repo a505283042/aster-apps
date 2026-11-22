@@ -126,6 +126,11 @@ static bool lookup_was_ready;
 static char track_buffer[HIFI_CATALOG_PATH_MAX];
 static char playing_track[sizeof(current_file)];
 static char selected_file[sizeof(current_file)];
+/* Only the native player's actual OPENING/PLAYING/PAUSED path may populate
+ * this cache. Keep that path visible during the firmware STOPPING -> IDLE
+ * handoff; selected_file is the last explicit LIBRARY choice, not the track
+ * currently playing after a global NEXT/PREV or background auto-next. */
+static char confirmed_media_track[sizeof(current_file)];
 static const char track_kv_key[] = "last_track";
 static const char mode_kv_key[] = "play_mode_v2";
 static bool start_busy;
@@ -354,7 +359,29 @@ static const char *display_track(void)
     const char *active = sandbox_track(player.path);
     if (local_active() && *active)
         return active;
+    /* A firmware-owned manual step briefly passes through IDLE with the
+     * previous media.path intact. Falling back to selected_file here would
+     * flash the originally tapped library track and reselect its cover/LRC
+     * before the next track begins. Retain only a previously confirmed
+     * native playback path; never invent or preselect the next song. */
+    if (player.mode == ASTER_PLAYER_LOCAL && *active &&
+        confirmed_media_track[0] && !strcmp(active, confirmed_media_track))
+        return confirmed_media_track;
     return selected_file[0] ? selected_file : active;
+}
+
+/* This is UI-only state: no audio commands, NVS writes, or SD lookups.
+ * Called on each successful media snapshot, not on every draw. */
+static void confirm_media_track(void)
+{
+    if (player.mode != ASTER_PLAYER_LOCAL ||
+        (player.state != ASTER_PLAYER_OPENING &&
+         player.state != ASTER_PLAYER_PLAYING &&
+         player.state != ASTER_PLAYER_PAUSED))
+        return;
+    const char *active = sandbox_track(player.path);
+    if (*active && strcmp(confirmed_media_track, active))
+        aster_snprintf(confirmed_media_track, sizeof(confirmed_media_track), "%s", active);
 }
 
 static const char *title(char name[256])
@@ -1917,6 +1944,10 @@ static void queue_track(const char *path)
     seeking = SEEK_IDLE;
     playing_track[0] = 0;
     start_busy = false;
+    /* Explicit library selection supersedes the retained background track.
+     * Manual NEXT/PREV does not call queue_track(), so it retains the old
+     * cover until the system actually reports its next OPENING path. */
+    confirmed_media_track[0] = 0;
     aster_snprintf(queued_file, sizeof(queued_file), "%s", path);
     select_track(path);
     if (media_in_use() && player.state != ASTER_PLAYER_STOPPING &&
@@ -2221,8 +2252,10 @@ static void poll(uint32_t now)
             seeking = SEEK_IDLE;
             finger.down = false;
             finger.control = NONE;
+            confirmed_media_track[0] = 0;
         }
         player = next;
+        confirm_media_track();
         if (firmware_queue_mode() && player.reserved[3] <= ORDER_SHUFFLE) {
             enum playback_order reported=(enum playback_order)player.reserved[3];
             if(playback_mode!=reported) {
@@ -2299,6 +2332,7 @@ ASTER_APP_EXPORT int aster_app_init(void)
     shuffle_seed ^= aster_time_now_ms();
     if (local_active() && !strncmp(sandbox_track(player.path), "/music/", 7))
         select_track(player.path);
+    confirm_media_track();
     controls_visible = true;
     scan_start();
     automatic_next();
