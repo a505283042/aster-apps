@@ -12,7 +12,6 @@ enum page { LYRICS, PLAYBACK, LIBRARY, PAPER };
 enum control {
     NONE,
     CLOSE,
-    VOLUME,
     SEEK,
     PREVIOUS,
     TOGGLE,
@@ -70,7 +69,7 @@ static uint32_t width, height, content_w, content_h;
 static int left, top;
 static aster_player_info_t player;
 static uint32_t last_poll, visible_second;
-static int volume, library_page, track_count, scan_error;
+static int library_page, track_count, scan_error;
 static bool dirty, library_scanned;
 static enum page page = PLAYBACK;
 /* Freestanding Aster APPs have no malloc/realloc. Pack variable-length names
@@ -1604,11 +1603,7 @@ static void activate(int id)
 
 static void slider(int id, int x)
 {
-    if (id == VOLUME) {
-        int next = clamp((x - VOLUME_X) * 100 / VOLUME_W, 0, 100);
-        if (volume != next && aster_audio_set_volume(next) >= 0)
-            volume = next;
-    } else if (id == SEEK && can_seek()) {
+    if (id == SEEK && can_seek()) {
         int start = page == PLAYBACK ? PLAY_SEEK_X : PROGRESS_X;
         int span = page == PLAYBACK ? PLAY_SEEK_W : PROGRESS_W;
         seek_position = (uint32_t)((uint64_t)player.duration_ms * clamp(x - start, 0, span) / span);
@@ -1629,7 +1624,7 @@ static void touch(const aster_event_t *event)
         finger.y = y;
         finger.control = hit(x, y);
         finger.page_swipe =
-            page_swipe_area(y) && finger.control != VOLUME && finger.control != DEMO;
+            page_swipe_area(y) && finger.control != DEMO;
         if (finger.control == SEEK)
             slider(SEEK, x);
         dirty = true;
@@ -1640,7 +1635,7 @@ static void touch(const aster_event_t *event)
     int dx = x - finger.x, dy = y - finger.y;
     int ax = abs_i(dx), ay = abs_i(dy);
     int id = finger.control;
-    bool is_slider = id == VOLUME || id == SEEK;
+    bool is_slider = id == SEEK;
     if (!page_swipe_area(y))
         finger.page_swipe = false;
     if (ax > 12 || ay > 12) {
@@ -1728,11 +1723,6 @@ static void poll(uint32_t now)
             start_queued(now);
     }
     sync_media();
-    int next_volume = aster_audio_get_volume();
-    if (next_volume >= 0 && next_volume != volume) {
-        volume = clamp(next_volume, 0, 100);
-        dirty = true;
-    }
 }
 
 ASTER_APP_EXPORT int aster_app_init(void)
@@ -1753,8 +1743,6 @@ ASTER_APP_EXPORT int aster_app_init(void)
     if (result < 0)
         return result;
     player_sample_at = aster_time_now_ms();
-    int initial_volume = aster_audio_get_volume();
-    volume = initial_volume < 0 ? 40 : clamp(initial_volume, 0, 100);
     aster_surface_desc_t desc = {.size = sizeof(desc),
                                  .version = 1,
                                  .width = width,
