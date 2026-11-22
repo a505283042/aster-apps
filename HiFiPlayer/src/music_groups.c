@@ -510,6 +510,23 @@ void hifi_groups_tick(bool playback_active)
     if ((processed%256u)==0u)
         aster_printf("HiFi tags progress=%u/%u",processed,expected_count);
 }
+/* The player must reuse parsed TPE1/Vorbis ARTIST data rather than wait for
+ * media_snapshot.artist (local firmware snapshots carry no ID3 metadata).
+ * Never expose partially restored cache data before payload CRC verification. */
+bool hifi_groups_track_artist(uint32_t track_id, char *out, unsigned capacity)
+{
+    if (!out || !capacity) return false;
+    out[0]=0;
+    if ((gc_mode==GC_PROBE || gc_mode==GC_READ) ||
+        track_id>=processed || track_id>=expected_count ||
+        expected_generation!=hifi_catalog_status().generation) return false;
+    uint16_t artist_id=track_artists[track_id];
+    if (artist_id>=artist_count) return false;
+    const char *name=pool_name(artists[artist_id].name_off);
+    if (!*name || !strcmp(name,"未知歌手")) return false;
+    aster_snprintf(out,capacity,"%s",name);
+    return true;
+}
 bool hifi_groups_busy(void) {return !ready && !blocked;}
 bool hifi_groups_ready(void) {return ready;}
 uint32_t hifi_groups_processed(void) {return processed;}
