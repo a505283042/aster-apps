@@ -168,6 +168,14 @@ void hifi_catalog_close(void)
     generation = 0;
 }
 
+void hifi_catalog_drop_snapshots(void)
+{
+    /* Never touch /music, the APP's other /data files, or installed assets. */
+    hifi_catalog_close();
+    for (unsigned i = 0; i < 2u; ++i)
+        (void)aster_fs_unlink(paths[i], strlen(paths[i]));
+}
+
 static int open_valid_snapshot(int slot, cat_header_t *header,
                                aster_handle_t *handle)
 {
