@@ -6,8 +6,6 @@
 #include "lrc.h"
 #include "paper.h"
 #include "shake.h"
-#include <stdlib.h>
-#include <limits.h>
 
 enum page { LYRICS, PLAYBACK, LIBRARY, PAPER };
 
@@ -72,11 +70,15 @@ static uint32_t width, height, content_w, content_h;
 static int left, top;
 static aster_player_info_t player;
 static uint32_t last_poll, visible_second;
-static int volume, library_page, track_count, track_capacity, scan_error;
+static int volume, library_page, track_count, scan_error;
 static bool dirty, library_scanned;
 static enum page page = PLAYBACK;
-/* Keep exactly the filenames we find; no fixed 64-entry catalog or 248-byte slots. */
-static char **tracks;
+/* Freestanding Aster APPs have no malloc/realloc. Pack variable-length names
+ * at the end of this WASM arena, and 32-bit offsets at the front. The number
+ * of songs has no fixed 64-entry limit; capacity depends on filename length. */
+enum { TRACK_ARENA_BYTES = 384 * 1024 };
+static _Alignas(4) unsigned char track_arena[TRACK_ARENA_BYTES];
+static size_t track_used;
 static char current_file[256], queued_file[256];
 static char playing_track[sizeof(current_file)];
 static bool start_busy;
@@ -357,41 +359,32 @@ static void scan_close(void)
 
 static void tracks_clear(void)
 {
-    for (int i = 0; i < track_count; i++)
-        free(tracks[i]);
-    free(tracks);
-    tracks = NULL;
-    track_count = track_capacity = 0;
+    track_count = 0;
+    track_used = 0;
+}
+
+static const char *track_name(int index)
+{
+    uint32_t offset = 0;
+    memcpy(&offset, track_arena + (size_t)index * sizeof(offset), sizeof(offset));
+    return (const char *)track_arena + TRACK_ARENA_BYTES - offset;
 }
 
 static bool track_append(const char *name, size_t length)
 {
-    if (track_count == INT_MAX || length >= 248)
+    if (track_count == INT32_MAX || length >= 248)
         return false;
-    char *copy = malloc(length + 1);
-    if (!copy)
+    /* Names grow downwards; the offset table grows upwards. Reject before
+     * they overlap. This retains all existing strings at stable addresses. */
+    size_t next_used = track_used + length + 1;
+    size_t index_end = ((size_t)track_count + 1) * sizeof(uint32_t);
+    if (next_used > TRACK_ARENA_BYTES || index_end > TRACK_ARENA_BYTES - next_used)
         return false;
-    if (track_count == track_capacity) {
-        if (track_capacity > INT_MAX / 2) {
-            free(copy);
-            return false;
-        }
-        int next_capacity = track_capacity ? track_capacity * 2 : 64;
-        if ((size_t)next_capacity > SIZE_MAX / sizeof(*tracks)) {
-            free(copy);
-            return false;
-        }
-        char **next = realloc(tracks, (size_t)next_capacity * sizeof(*tracks));
-        if (!next) {
-            free(copy);
-            return false;
-        }
-        tracks = next;
-        track_capacity = next_capacity;
-    }
-    memcpy(copy, name, length);
-    copy[length] = 0;
-    tracks[track_count++] = copy;
+    memcpy(track_arena + TRACK_ARENA_BYTES - next_used, name, length + 1);
+    uint32_t offset = (uint32_t)next_used;
+    memcpy(track_arena + (size_t)track_count * sizeof(offset), &offset, sizeof(offset));
+    track_used = next_used;
+    track_count++;
     return true;
 }
 
@@ -1276,7 +1269,7 @@ static int current_index(void)
     if (strncmp(path, "/music/", 7))
         return -1;
     for (int i = 0; i < track_count; i++)
-        if (!strcmp(path + 7, tracks[i]))
+        if (!strcmp(path + 7, track_name(i)))
             return i;
     return -1;
 }
@@ -1309,9 +1302,9 @@ static void library(void)
             line(22, y + ROW_H - 2, 438, y + ROW_H - 2, rail);
         aster_snprintf(temp, sizeof(temp), "%02d", index + 1);
         text(33, y + 18, 45, 18, gold, temp, LEFT);
-        display_name(tracks[index], temp);
+        display_name(track_name(index), temp);
         text(77, y + 13, 260, 24, ink, temp, LEFT);
-        text(351, y + 19, 69, 18, muted, format(tracks[index]), RIGHT);
+        text(351, y + 19, 69, 18, muted, format(track_name(index)), RIGHT);
     }
     if (!track_count && library_scanned) {
         text(26, 200, 408, 19, ink,
@@ -1510,7 +1503,7 @@ static void play_index(int index)
     if (index < 0 || index >= track_count)
         return;
     char path[256];
-    aster_snprintf(path, sizeof(path), "/music/%s", tracks[index]);
+    aster_snprintf(path, sizeof(path), "/music/%s", track_name(index));
     queue_track(path);
 }
 
@@ -1688,7 +1681,7 @@ static void poll(uint32_t now)
         }
         int index = automatic_next();
         if (index >= 0)
-            aster_snprintf(queued_file, sizeof(queued_file), "/music/%s", tracks[index]);
+            aster_snprintf(queued_file, sizeof(queued_file), "/music/%s", track_name(index));
         if (queued_file[0] && player.mode == ASTER_PLAYER_LOCAL && !media_in_use())
             start_queued(now);
     }
