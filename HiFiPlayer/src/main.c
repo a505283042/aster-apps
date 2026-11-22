@@ -1460,6 +1460,7 @@ static void library(void)
     bool folder_view = library_mode == LIBRARY_FOLDER_TREE;
     bool group_root = group_type && library_detail_group < 0;
     hifi_catalog_status_t catalog = hifi_catalog_status();
+    hifi_browser_progress_t folders = hifi_browser_progress();
 
     for (int tab=0;tab<5;tab++) {
         bool chosen = (int)library_mode == tab;
@@ -1525,9 +1526,54 @@ static void library(void)
         text(351,y+19,70,18,muted,meta,RIGHT);
     }
 
-    if (group_type && !hifi_groups_ready()) {
-        if (catalog.scanning)
-            aster_snprintf(temp,sizeof(temp),"等待曲库索引完成...");
+    /* Only the very first HIF2 build blocks the local library.
+     * Discovery has no known total; do not display an invented percentage. */
+    if (!catalog.has_saved) {
+        box(25,158,410,177,14,panel,false);
+        text(32,174,396,26,gold,"正在建立首次音乐索引",CENTER);
+        if (catalog.scanning && !catalog.verifying) {
+            aster_snprintf(temp,sizeof(temp),"已发现 %u 首歌曲",
+                           catalog.discovered);
+            text(45,221,370,24,ink,temp,CENTER);
+            aster_snprintf(temp,sizeof(temp),"已扫描 %u 个文件夹 · 总量未知",
+                           catalog.folders_discovered);
+            text(42,252,376,18,muted,temp,CENTER);
+        } else if (catalog.verifying && catalog.verify_total) {
+            uint32_t done=catalog.verify_bytes, total=catalog.verify_total;
+            aster_snprintf(temp,sizeof(temp),"正在验证基础索引 %u / %u",
+                           done / 160u,total / 160u);
+            text(45,220,370,22,ink,temp,CENTER);
+            box(50,264,360,10,5,rail,false);
+            int fill=(int)((uint64_t)done*360u/total);
+            if(fill)box(50,264,fill,10,5,gold,false);
+        } else {
+            text(45,216,370,22,ink,
+                 scan_error<0 ? "建库失败，请检查 TF 卡后点击重扫" :
+                                "准备建立曲库索引",CENTER);
+        }
+        text(35,303,390,16,muted,"完成基础索引后即可播放；标签随后整理",CENTER);
+    } else if (folder_view && !folders.ready) {
+        if (folders.error) {
+            text(26,200,408,19,ink,"目录索引出错，请重新启动 APP",CENTER);
+        } else {
+            const char *stage=folders.stage==HIFI_BROWSER_LOADING ?
+                       "正在读取目录索引" :
+                       folders.stage==HIFI_BROWSER_WAIT ?
+                       "等待基础曲库索引" :
+                       folders.stage==HIFI_BROWSER_SAVING ?
+                       "正在保存目录索引" : "首次建立文件夹目录索引";
+            text(26,192,408,20,ink,stage,CENTER);
+            if(folders.total) {
+                aster_snprintf(temp,sizeof(temp),"%u / %u",folders.done,folders.total);
+                text(26,226,408,18,muted,temp,CENTER);
+                box(50,260,360,8,4,rail,false);
+                int fill=(int)((uint64_t)folders.done*360u/folders.total);
+                if(fill)box(50,260,fill,8,4,gold,false);
+            }
+        }
+    } else if (group_type && !hifi_groups_ready()) {
+        if (catalog.scanning && !catalog.has_saved)
+            aster_snprintf(temp,sizeof(temp),"等待基础曲库索引...");
         else if (hifi_groups_busy())
             aster_snprintf(temp,sizeof(temp),"读取标签 %u / %u",
                            hifi_groups_processed(),hifi_groups_total());
@@ -1535,16 +1581,11 @@ static void library(void)
             aster_snprintf(temp,sizeof(temp),"标签分组失败，请重扫索引");
         text(26,199,408,19,ink,temp,CENTER);
     } else if (!visible && !folder_view && !group_type && !catalog.scanning) {
-        text(26,200,408,19,ink,
-             scan_error<0 && scan_error!=ASTER_ENOENT?"无法打开存储卡曲库":"曲库暂无音乐",
-             CENTER);
+        text(26,200,408,19,ink,"曲库暂无音乐",CENTER);
         text(26,236,408,16,muted,"将 MP3、FLAC 或 WAV 放入 music 目录",CENTER);
-    } else if (folder_view && hifi_browser_error())
-        text(26,200,408,19,ink,"文件夹列表读取失败",CENTER);
-    else if (folder_view && hifi_browser_busy() && !visible)
-        text(26,200,408,19,muted,"正在整理文件夹...",CENTER);
-    else if (!visible && library_scanned)
+    } else if (!visible && library_scanned) {
         text(26,200,408,19,muted,"当前分类没有歌曲",CENTER);
+    }
 
     uint16_t prev=library_page>0?gold:border;
     uint16_t next=library_page+1<page_count()?gold:border;
@@ -1552,8 +1593,12 @@ static void library(void)
     box(316,LIBRARY_PAGER+6,126,47,10,chrome,false);
     text(18,LIBRARY_PAGER+17,126,20,prev,"上一页",CENTER);
     text(316,LIBRARY_PAGER+17,126,20,next,"下一页",CENTER);
-    if (folder_view && hifi_browser_busy())
-        aster_snprintf(temp,sizeof(temp),"整理 %d",visible);
+    if (!catalog.has_saved && catalog.scanning)
+        aster_snprintf(temp,sizeof(temp),"建库 %u 首",catalog.discovered);
+    else if (catalog.scanning)
+        aster_snprintf(temp,sizeof(temp),"更新 %u 首",catalog.discovered);
+    else if (folder_view && !folders.ready)
+        aster_snprintf(temp,sizeof(temp),"目录索引");
     else
         aster_snprintf(temp,sizeof(temp),"%d / %d",library_page+1,page_count());
     text(158,LIBRARY_PAGER+17,144,20,ink,temp,CENTER);
@@ -1766,6 +1811,10 @@ static void start_queued(uint32_t now)
 
 static void queue_track(const char *path)
 {
+    if (!strncmp(path,"/music/",7) && !hifi_catalog_status().has_saved) {
+        notice("首次曲库索引完成后才能播放");
+        return;
+    }
     if (bluetooth_input()) {
         notice("请先在系统蓝牙中断开手机");
         return;
