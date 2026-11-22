@@ -296,8 +296,7 @@ static bool local_active(void)
 {
     return player.mode == ASTER_PLAYER_LOCAL &&
            (player.state == ASTER_PLAYER_PLAYING || player.state == ASTER_PLAYER_PAUSED ||
-            player.state == ASTER_PLAYER_OPENING || player.state == ASTER_PLAYER_STOPPING ||
-            player.state == ASTER_PLAYER_ENDED);
+            player.state == ASTER_PLAYER_OPENING || player.state == ASTER_PLAYER_STOPPING);
 }
 
 static const char *display_track(void)
@@ -1556,6 +1555,7 @@ static void queue_track(const char *path)
     if (media_in_use() && player.state != ASTER_PLAYER_STOPPING &&
         control(ASTER_PLAYER_STOP, 0, NULL) < 0)
         queued_file[0] = 0;
+    controls_visible = true;
     set_page(PLAYBACK);
     dirty = true;
 }
@@ -1608,10 +1608,10 @@ static void activate(int id)
     case TOGGLE:
         if (!bluetooth_input() && !media_in_use()) {
             const char *track = sandbox_track(player.path);
-            if (*track)
-                queue_track(track);
-            else if (selected_file[0])
+            if (selected_file[0])
                 queue_track(selected_file);
+            else if (*track)
+                queue_track(track);
             else if (current_file[0])
                 queue_track(current_file);
             else if (track_count)
