@@ -272,6 +272,12 @@ static bool finish_tree(void)
             return false;
     return true;
 }
+static bool path_terminated(const char *value,unsigned capacity)
+{
+    for(unsigned i=0;i<capacity;i++)
+        if(!value[i])return true;
+    return false;
+}
 static bool validate_tree(void)
 {
     if(!node_count || nodes[0].parent!=0 || nodes[0].name[0] ||
@@ -279,7 +285,7 @@ static bool validate_tree(void)
     uint32_t running=0;
     for(uint32_t id=0;id<node_count;id++){
         const folder_node_t *n=&nodes[id];
-        if(id && (n->parent>=id || !memchr(n->name,0,sizeof(n->name))))
+        if(id && (n->parent>=id || !path_terminated(n->name,sizeof(n->name))))
             return false;
         if(n->first!=running || n->count>ref_count-running)return false;
         running+=n->count;
