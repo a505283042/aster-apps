@@ -21,7 +21,7 @@ def between(start: str, end: str) -> str:
 
 class HiFiControlsV1(unittest.TestCase):
     def test_version_and_460_canvas(self):
-        self.assertIn('version = "0.5.0-alpha.8"', MANIFEST)
+        self.assertIn('version = "0.5.0-alpha.9"', MANIFEST)
         self.assertIn("DESIGN = 460", SRC)
 
     def test_seek_bar_render_and_touch_are_consistent(self):
