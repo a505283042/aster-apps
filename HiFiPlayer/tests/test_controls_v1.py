@@ -100,6 +100,44 @@ class HiFiControlsV1(unittest.TestCase):
         self.assertNotIn("*by ? by : source_label()", playback)
         self.assertIn("playback_source_indicator(white);", playback)
 
+
+    def test_idle_next_previous_bootstrap_from_persistent_track(self):
+        step = between("static void step_idle_library(int direction)",
+                       "static void change_library_page(int step)")
+        self.assertIn("current_index()", step)
+        self.assertIn("play_index(next);", step)
+        self.assertIn("ORDER_SEQUENCE", step)
+        self.assertIn("ORDER_SHUFFLE", step)
+        self.assertIn("track_count", step)
+        transport = between("    case PREVIOUS:\n    case NEXT:", "    default:")
+        self.assertLess(transport.index("!media_in_use()"),
+                        transport.index("firmware_queue_mode()"))
+        self.assertIn("step_idle_library(id == NEXT ? 1 : -1)", transport)
+        self.assertIn("control(id == PREVIOUS ? ASTER_PLAYER_PREVIOUS :", transport)
+        # No APP-owned background queue or duplicate decoder ownership.
+        self.assertNotIn("queue_track(", transport)
+
+    def test_file_tag_artist_preferred_over_lrc_and_remote_status(self):
+        artist = between("static const char *artist(void)",
+                         "static void cache_artist_when_idle(")
+        self.assertIn("hifi_groups_track_artist", artist)
+        self.assertIn("indexed_artist", artist)
+        self.assertIn("selected_artist", artist)
+        self.assertLess(artist.index("hifi_groups_track_artist"),
+                        artist.index("lyrics.artist"))
+        self.assertIn("bluetooth_input()", artist)
+        self.assertNotIn("source_label()", artist)
+        idle = between("static void cache_artist_when_idle(", "static void notice(")
+        self.assertIn("media_in_use()", idle)
+        self.assertIn("hifi_tags_read(path+7,&tags)", idle)
+        start = between("static void start_queued(uint32_t now)",
+                        "static void queue_track(")
+        self.assertLess(start.index("cache_artist_when_idle(queued_file);"),
+                        start.index("ASTER_PLAYER_PLAY_FILE"))
+        frame = between("ASTER_APP_EXPORT void aster_app_event(",
+                        "ASTER_APP_EXPORT void aster_app_pause(")
+        self.assertIn("!media_in_use() && !queued_file[0]", frame)
+
     def test_error_toast_kept_without_permanent_notice_slot(self):
         draw = between("static void draw(uint32_t now)", "static int hit(int x, int y)")
         self.assertIn("if (message[0] &&", draw)
