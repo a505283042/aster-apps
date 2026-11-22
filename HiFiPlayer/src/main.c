@@ -74,7 +74,7 @@ enum {
 };
 
 #define RGB(r, g, b) ((uint16_t)(((r) & 0xf8) << 8 | ((g) & 0xfc) << 3 | (b) >> 3))
-static const uint16_t background = RGB(13, 17, 22), rim = RGB(16, 22, 29), chrome = RGB(26, 34, 44),
+static const uint16_t background = RGB(13, 17, 22), chrome = RGB(26, 34, 44),
                       ink = RGB(243, 240, 232), muted = RGB(162, 170, 178),
                       border = RGB(53, 60, 71), gold = RGB(237, 186, 115), panel = RGB(34, 43, 54),
                       selected = RGB(48, 42, 36), lyric_accent = RGB(255, 157, 78),
