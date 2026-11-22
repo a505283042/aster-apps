@@ -151,17 +151,17 @@ static void check(unsigned w, unsigned h)
         result = cover_jpeg_step(&ow, &oh);
         slices++;
     } while (!result);
-    assert(result == 1 && ow && oh && ow <= COVER_EDGE && oh <= COVER_EDGE);
-    unsigned edge = w > h ? w : h;
-    unsigned target = edge < COVER_EDGE ? edge : COVER_EDGE;
-    assert(ow == (w * target + edge / 2) / edge && oh == (h * target + edge / 2) / edge);
+    assert(result == 1 && ow == COVER_EDGE && oh == COVER_EDGE);
     unsigned shift = 0;
     while (shift < 3 && (w >> (shift + 1)) >= ow && (h >> (shift + 1)) >= oh)
         shift++;
+    unsigned sw = w >> shift, sh = h >> shift;
+    unsigned side = sw < sh ? sw : sh;
+    unsigned ox = (sw - side) / 2, oy = (sh - side) / 2;
     for (unsigned y = 0; y < oh; y++) {
         for (unsigned x = 0; x < ow; x++) {
-            unsigned sx = (((2 * x + 1) * (w >> shift)) / (2 * ow)) << shift;
-            unsigned sy = (((2 * y + 1) * (h >> shift)) / (2 * oh)) << shift;
+            unsigned sx = (ox + ((2 * x + 1) * side) / (2 * ow)) << shift;
+            unsigned sy = (oy + ((2 * y + 1) * side) / (2 * oh)) << shift;
             unsigned grey = ((sx / 8) ^ (sy / 8)) & 1 ? 160 : 128;
             unsigned rgb565 = (grey >> 3) << 11 | (grey >> 2) << 5 | (grey >> 3);
             assert(canvas[1 + y * ow + x] == rgb565);
@@ -178,7 +178,7 @@ int main(void)
     for (unsigned cap = 2; cap <= 16; cap *= 2) {
         unsigned w = 0, h = 0;
         assert(cover_jpeg_begin(1, PREFIX, tail - PREFIX, cap, canvas, work));
-        assert(cover_jpeg_step(&w, &h) == 1 && w == cap && h == cap / 2);
+        assert(cover_jpeg_step(&w, &h) == 1 && w == cap && h == cap);
         /* RGB565: warm flesh tone on the left, blue on the right. */
         for (unsigned y = 0; y < h; y++)
             for (unsigned x = 0; x < w; x++)
@@ -200,5 +200,5 @@ int main(void)
         result = cover_jpeg_step(&w, &h);
     } while (!result);
     assert(result < 0);
-    puts("sliced JPEG covers passed");
+    puts("full-resolution cropped sliced JPEG covers passed");
 }
