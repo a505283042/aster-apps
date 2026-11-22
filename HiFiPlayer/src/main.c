@@ -87,7 +87,7 @@ static int left, top;
 static aster_player_info_t player;
 static uint32_t last_poll, visible_second;
 static int library_page, track_count, scan_error;
-static uint32_t scan_progress_drawn;
+static uint32_t scan_progress_drawn, scan_verify_drawn;
 enum library_mode { LIBRARY_ALL_TRACKS, LIBRARY_ARTISTS, LIBRARY_ALBUMS,
                     LIBRARY_DECADES, LIBRARY_FOLDER_TREE };
 static enum library_mode library_mode = LIBRARY_ALL_TRACKS;
@@ -517,8 +517,12 @@ static void scan_tick(void)
         dirty=true;
     }
     if(page==LIBRARY && status.scanning && !status.has_saved &&
-       status.discovered/16u != scan_progress_drawn/16u)dirty=true;
+       (status.discovered/16u != scan_progress_drawn/16u ||
+        status.verify_bytes/4096u != scan_verify_drawn/4096u ||
+        status.verifying && !scan_verify_drawn))
+        dirty=true;
     scan_progress_drawn=status.discovered;
+    scan_verify_drawn=status.verify_bytes;
     if(!selected_file[0] && track_count && !bluetooth_input()) {
         char first[256];
         if(index_path(0,first,sizeof(first)))select_track(first);
@@ -2280,6 +2284,7 @@ ASTER_APP_EXPORT void aster_app_resume(void)
 static void cleanup(void)
 {
     hifi_groups_close();
+    hifi_browser_close();
     scan_close();
     lyrics_close();
     cover_close();
