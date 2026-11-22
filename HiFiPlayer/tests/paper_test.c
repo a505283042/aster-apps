@@ -9,17 +9,52 @@
 
 enum { SIDE = 460 };
 static FILE *asset;
+static bool shared_font_available;
+/* Both virtual sources map to checked-in font assets for host testing.
+ * Flip availability to exercise both the lean package shared source and
+ * compatibility fallback through the legacy packaged asset path. */
+static const char *font_test_path(const char *path)
+{
+    static char physical[160];
+    if (!strncmp(path, "/sd/aster/shared/hifi/fonts/", 32)) {
+        if (!shared_font_available) return NULL;
+        snprintf(physical, sizeof(physical), "text/%s", path + 32);
+        return physical;
+    }
+    if (!strncmp(path, "/assets/text/", 13)) {
+        snprintf(physical, sizeof(physical), "text/%s", path + 13);
+        return physical;
+    }
+    return NULL;
+}
 static uint16_t frame[SIDE * SIDE], expected[SIDE * SIDE];
 static unsigned partial_frames, system_text_frames;
 static lrc_t track;
 
 int32_t aster_fs_open(const char *path, uint32_t length, uint32_t flags, aster_handle_t *out)
 {
-    assert(!asset && !strncmp(path, "/assets/", 8));
+    assert(!asset);
     assert(length == strlen(path) && flags == ASTER_FS_O_RDONLY);
-    asset = fopen(path + 8, "rb");
-    *out = 1;
+    const char *physical = font_test_path(path);
+    if (!physical) return -1;
+    asset = fopen(physical, "rb");
+    *out = asset ? 1 : 0;
     return asset ? 0 : -1;
+}
+
+int32_t aster_fs_stat(const char *path, uint32_t length, aster_stat_t *out, uint32_t bytes)
+{
+    assert(length == strlen(path) && out && bytes == sizeof(*out));
+    const char *physical = font_test_path(path);
+    if (!physical) return -1;
+    FILE *file = fopen(physical, "rb");
+    if (!file) return -1;
+    assert(fseek(file, 0, SEEK_END) == 0);
+    long size = ftell(file);
+    assert(size >= 0);
+    fclose(file);
+    *out = (aster_stat_t){.size=sizeof(*out), .version=1, .filesize=(uint64_t)size};
+    return 0;
 }
 
 int32_t aster_fs_seek(aster_handle_t handle, int32_t offset, uint32_t whence)
@@ -169,5 +204,12 @@ int main(void)
     assert(paper_draw(&gfx, 0, 0, SIDE, 0, 0, 650, track.text + track.cue[4].text_offset, NULL,
                       (lyric_transition_t){UINT32_MAX, false}) >= 0);
     assert(system_text_frames == 1);
+
+    /* Shared-font SD path and old /assets fallback must both read real ALV1. */
+    shared_font_available = true;
+    check_words("When the night arrives", 0);
+    shared_font_available = false;
+    check_words("When the night arrives", 0);
+    assert(!asset);
     return 0;
 }
