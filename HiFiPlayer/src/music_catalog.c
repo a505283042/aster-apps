@@ -52,8 +52,32 @@ static uint32_t discovered, record_crc, sig_xor, sig_sum;
 static uint32_t generation;
 static int active_slot = -1;
 static int32_t scan_error;
-static bool scanning, has_saved, published;
-static uint32_t last_stat_log;
+static bool scanning, verifying, has_saved;
+static uint32_t last_stat_log, verify_bytes, verify_crc;
+static cat_header_t pending_header;
+static uint8_t verify_chunk[4096];
+
+static bool read_exact(aster_handle_t file, void *dst, unsigned size)
+{
+    unsigned done = 0;
+    while (done < size) {
+        int got = aster_fs_read(file, (uint8_t *)dst + done, size - done);
+        if (got <= 0) return false;
+        done += (unsigned)got;
+    }
+    return true;
+}
+
+static bool write_exact(aster_handle_t file, const void *src, unsigned size)
+{
+    unsigned done = 0;
+    while (done < size) {
+        int got = aster_fs_write(file, (const uint8_t *)src + done, size - done);
+        if (got <= 0) return false;
+        done += (unsigned)got;
+    }
+    return true;
+}
 
 static uint32_t crc_step(uint32_t crc, const void *data, unsigned len)
 {
@@ -108,8 +132,8 @@ void hifi_catalog_close(void)
     if (active) aster_fs_close(active);
     active = staging = 0;
     active_slot = -1;
-    scanning = has_saved = published = false;
-    discovered = 0;
+    scanning = verifying = has_saved = false;
+    discovered = verify_bytes = 0;
     generation = 0;
 }
 
@@ -122,10 +146,10 @@ static int open_valid_snapshot(int slot, cat_header_t *header,
     if (aster_fs_stat(path, strlen(path), &stat, sizeof(stat)) < 0 ||
         aster_fs_open(path, strlen(path), ASTER_FS_O_RDONLY, &file) < 0)
         return 0;
-    int n = aster_fs_read(file, header, sizeof(*header));
+    bool read_ok = read_exact(file, header, sizeof(*header));
     uint32_t hcrc = ~crc_step(0xffffffffu, header,
                                      sizeof(*header) - sizeof(header->header_crc));
-    if (n != (int)sizeof(*header) || header->magic != CAT_MAGIC ||
+    if (!read_ok || header->magic != CAT_MAGIC ||
         header->version != CAT_VERSION || header->count > HIFI_CATALOG_TRACK_MAX ||
         header->header_crc != hcrc ||
         stat.filesize != (uint64_t)sizeof(*header) +
@@ -148,51 +172,90 @@ static bool enter_directory(const char *path)
     return true;
 }
 
+static int candidate_slot(void)
+{
+    return active_slot == 0 ? 1 : 0;
+}
+
+static void discard_staging(void)
+{
+    verifying = false;
+    if (staging) aster_fs_close(staging);
+    staging = 0;
+    int slot = candidate_slot();
+    (void)aster_fs_unlink(paths[slot], strlen(paths[slot]));
+}
+
 static void finish_scan(bool success)
 {
     close_stack();
     scanning = false;
     if (!staging) return;
-    int stage_slot = active_slot == 0 ? 1 : 0;
-    if (active_slot < 0) stage_slot = 0;
-    if (success && has_saved && committed.count == discovered &&
+    if (!success) {
+        discard_staging();
+        return; /* last valid snapshot stays published */
+    }
+    if (has_saved && committed.count == discovered &&
         committed.signature_xor == sig_xor &&
         committed.signature_sum == sig_sum) {
-        /* Same logical path+size set: keep the previous generation. */
-        aster_fs_close(staging);
-        staging = 0;
-        aster_fs_unlink(paths[stage_slot], strlen(paths[stage_slot]));
+        /* Logical path/size set has not changed; no new generation. */
+        discard_staging();
         return;
     }
-    if (!success) {
-        aster_fs_close(staging);
-        staging = 0;
-        aster_fs_unlink(paths[stage_slot], strlen(paths[stage_slot]));
-        return; /* old published Catalog remains valid */
-    }
-    cat_header_t header = {
+    pending_header = (cat_header_t){
         .magic = CAT_MAGIC, .version = CAT_VERSION,
         .generation = generation + 1u, .count = discovered,
         .payload_crc = ~record_crc, .signature_xor = sig_xor,
         .signature_sum = sig_sum, .flags = 0
     };
-    header.header_crc = ~crc_step(0xffffffffu, &header,
-                           sizeof(header) - sizeof(header.header_crc));
+    pending_header.header_crc = ~crc_step(0xffffffffu, &pending_header,
+                    sizeof(pending_header) - sizeof(pending_header.header_crc));
     if (aster_fs_seek(staging, 0, ASTER_FS_SEEK_SET) < 0 ||
-        aster_fs_write(staging, &header, sizeof(header)) != (int)sizeof(header)) {
+        !write_exact(staging, &pending_header, sizeof(pending_header))) {
         scan_error = ASTER_EIO;
-        aster_fs_close(staging);
-        staging = 0;
-        aster_fs_unlink(paths[stage_slot], strlen(paths[stage_slot]));
+        discard_staging();
         return;
     }
+    /* Validate the freshly written payload IN SMALL FRAME BUDGETS before
+     * exposing it. This is the S31 temp/final/bak recovery principle,
+     * adapted to Aster's lack of an atomic rename/fsync API. */
+    verify_bytes = 0;
+    verify_crc = 0xffffffffu;
+    verifying = true;
+}
+
+static void verify_tick(void)
+{
+    if (!verifying) return;
+    uint32_t total = discovered * (uint32_t)sizeof(cat_row_t);
+    unsigned count = total - verify_bytes;
+    if (count > sizeof(verify_chunk)) count = sizeof(verify_chunk);
+    if (count) {
+        uint32_t pos = (uint32_t)sizeof(cat_header_t) + verify_bytes;
+        if (aster_fs_seek(staging, (int32_t)pos, ASTER_FS_SEEK_SET) < 0 ||
+            !read_exact(staging, verify_chunk, count)) {
+            scan_error = ASTER_EIO;
+            discard_staging();
+            return;
+        }
+        verify_crc = crc_step(verify_crc, verify_chunk, count);
+        verify_bytes += count;
+    }
+    if (verify_bytes != total) return;
+    if ((~verify_crc) != pending_header.payload_crc) {
+        scan_error = ASTER_ECORRUPT;
+        discard_staging();
+        return;
+    }
+    int slot = candidate_slot();
     if (active) aster_fs_close(active);
     active = staging;
     staging = 0;
-    committed = header;
-    active_slot = stage_slot;
-    generation = header.generation;
-    has_saved = published = true;
+    committed = pending_header;
+    active_slot = slot;
+    generation = committed.generation;
+    has_saved = true;
+    verifying = false;
     aster_printf("HiFi catalog committed tracks=%u generation=%u",
                  discovered, generation);
 }
@@ -220,15 +283,14 @@ void hifi_catalog_start(void)
     }
     has_saved = active != 0;
     /* Never truncate the published slot before the replacement is complete. */
-    int stage_slot = active_slot == 0 ? 1 : 0;
-    if (active_slot < 0) stage_slot = 0;
+    int stage_slot = candidate_slot();
     (void)aster_fs_mkdir("/data", 5);
     scan_error = aster_fs_open(paths[stage_slot], strlen(paths[stage_slot]),
                    ASTER_FS_O_RDWR | ASTER_FS_O_CREAT | ASTER_FS_O_TRUNC,
                    &staging);
     if (scan_error < 0) return;
     cat_header_t blank = {0};
-    if (aster_fs_write(staging, &blank, sizeof(blank)) != (int)sizeof(blank)) {
+    if (!write_exact(staging, &blank, sizeof(blank))) {
         scan_error = ASTER_EIO;
         finish_scan(false);
         return;
@@ -247,6 +309,10 @@ void hifi_catalog_start(void)
 
 void hifi_catalog_tick(void)
 {
+    if (verifying) {
+        verify_tick();
+        return;
+    }
     if (!scanning) return;
     uint32_t begun = aster_time_now_ms();
     for (unsigned i = 0; i < CAT_STEP_ENTRIES && scanning; i++) {
@@ -283,9 +349,14 @@ void hifi_catalog_tick(void)
         char full[256];
         aster_snprintf(full, sizeof(full), "%s/%s", parent, name);
         if (is_dir) {
-            /* Ignore folders deeper than our fixed directory-handle budget. */
-            if (depth + 1 < CAT_DEPTH)
-                (void)enter_directory(full);
+            /* Avoid silently committing an incomplete catalog. */
+            if (depth + 1 >= CAT_DEPTH) {
+                scan_error = ASTER_ENOMEM;
+                finish_scan(false);
+            } else if (!enter_directory(full)) {
+                scan_error = ASTER_EIO;
+                finish_scan(false);
+            }
             continue;
         }
         if (!music_extension(name)) continue;
@@ -306,7 +377,7 @@ void hifi_catalog_tick(void)
         uint32_t spot = sizeof(cat_header_t) + discovered * sizeof(row);
         if (spot > INT32_MAX ||
             aster_fs_seek(staging, (int32_t)spot, ASTER_FS_SEEK_SET) < 0 ||
-            aster_fs_write(staging, &row, sizeof(row)) != (int)sizeof(row)) {
+            !write_exact(staging, &row, sizeof(row))) {
             scan_error = ASTER_EIO;
             finish_scan(false);
             break;
@@ -330,7 +401,7 @@ hifi_catalog_status_t hifi_catalog_status(void)
         .discovered = discovered,
         .generation = generation,
         .error = scan_error,
-        .scanning = scanning,
+        .scanning = scanning || verifying,
         .has_saved = has_saved
     };
     return state;
@@ -347,7 +418,7 @@ bool hifi_catalog_path_at(uint32_t index, char *out, unsigned capacity)
     uint32_t pos = (uint32_t)sizeof(cat_header_t) + index * (uint32_t)sizeof(cat_row_t);
     cat_row_t row;
     if (pos > INT32_MAX || aster_fs_seek(file, (int32_t)pos, ASTER_FS_SEEK_SET) < 0 ||
-        aster_fs_read(file, &row, sizeof(row)) != (int)sizeof(row) ||
+        !read_exact(file, &row, sizeof(row)) ||
         !memchr(row.name, 0, sizeof(row.name)) || row.name[0] == '/' ||
         !row.name[0])
         return false;
