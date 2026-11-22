@@ -2,7 +2,7 @@
 id = "aster.hifi"
 name = "Aster 音乐"
 description = "S31 全屏封面双状态播放器，支持本地音乐、歌词与蓝牙音频。"
-version = "0.4.30"
+version = "0.4.31"
 abi = "4.5.0"
 abi_min = "4.5"
 aot = true
