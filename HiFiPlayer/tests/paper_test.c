@@ -33,6 +33,13 @@ static uint16_t frame[SIDE * SIDE], expected[SIDE * SIDE];
 static unsigned partial_frames, system_text_frames;
 static lrc_t track;
 
+/* paper_font.c logs only once if a shared font is unavailable. */
+void aster_logf(int level, const char *fmt, ...)
+{
+    (void)level;
+    (void)fmt;
+}
+
 int32_t aster_fs_open(const char *path, uint32_t length, uint32_t flags, aster_handle_t *out)
 {
     assert(!asset);
