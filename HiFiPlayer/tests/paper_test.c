@@ -16,9 +16,11 @@ static bool shared_font_available;
 static const char *font_test_path(const char *path)
 {
     static char physical[160];
-    if (!strncmp(path, "/sd/aster/shared/hifi/fonts/", 32)) {
+    static const char shared_prefix[] = "/sd/aster/shared/hifi/fonts/";
+    if (!strncmp(path, shared_prefix, sizeof(shared_prefix) - 1)) {
         if (!shared_font_available) return NULL;
-        snprintf(physical, sizeof(physical), "text/%s", path + 32);
+        snprintf(physical, sizeof(physical), "text/%s",
+                 path + sizeof(shared_prefix) - 1);
         return physical;
     }
     if (!strncmp(path, "/assets/text/", 13)) {
