@@ -73,17 +73,31 @@ class HiFiControlsV1(unittest.TestCase):
         self.assertEqual((230 - 47) - (116 + 37), 30)
         self.assertEqual((344 - 37) - (230 + 47), 30)
 
-    def test_notice_badge_is_contextual(self):
-        statuses = between("static void playback_status_pills(", "static void playback_audio_info(")
-        self.assertIn('message[0] ? "提示"', statuses)
-        self.assertIn('ASTER_PLAYER_PLAYING ? "播放中"', statuses)
-        self.assertIn('ASTER_PLAYER_PAUSED ? "已暂停"', statuses)
-        self.assertIn('ASTER_PLAYER_ERROR ? "播放错误"', statuses)
+    def test_one_current_audio_source_in_center(self):
+        source = between("static const char *source_label(void)", "static const char *playback_state(void)")
+        self.assertIn('return "有线";', source)
+        self.assertIn('return "蓝牙接收";', source)
+        self.assertIn('return "蓝牙发射";', source)
+        indicator = between("static void playback_source_indicator(", "static void playback_audio_info(")
+        self.assertIn("const char *name = source_label();", indicator)
+        self.assertIn("box(146, 382, 168, 60", indicator)
+        self.assertIn("text(199, 400, 106, 20, white, name, CENTER)", indicator)
+        self.assertNotIn("aster_device_audio_set_volume", indicator)
+        playback = between("static void playback(void)", "static int next_lyric_group(")
+        self.assertIn("playback_source_indicator(white);", playback)
+        self.assertNotIn("playback_status_pills", SRC)
+        self.assertEqual(playback.count("playback_source_indicator(white);"), 1)
+        self.assertIn("box(48, 382, 60, 60", playback)
+        self.assertIn("box(352, 382, 60, 60", playback)
 
-    def test_info_and_source_pills(self):
-        statuses = between("static void playback_status_pills(", "static void playback_audio_info(")
-        for label in ("有线", "蓝牙接收", "蓝牙发射", "提示"):
-            self.assertIn(label, statuses)
+    def test_error_toast_kept_without_permanent_notice_slot(self):
+        draw = between("static void draw(uint32_t now)", "static int hit(int x, int y)")
+        self.assertIn("if (message[0] &&", draw)
+        self.assertIn("text(44, ty + (page == PLAYBACK ? 7 : 12)", draw)
+        report = between("static int report_control(", "static int control(")
+        self.assertIn("notice(", report)
+
+    def test_queue_metadata_remains(self):
         info = between("static void playback_audio_info(", "/* Two fully distinct album states")
         self.assertIn("current_index()", info)
         self.assertIn("track_count", info)
