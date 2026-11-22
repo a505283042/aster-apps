@@ -56,6 +56,7 @@ static int active_slot = -1;
 static int32_t scan_error;
 static bool scanning, verifying, has_saved;
 static uint32_t last_stat_log, verify_bytes, verify_crc;
+static uint32_t folders_discovered;
 static cat_header_t pending_header;
 static uint8_t verify_chunk[4096];
 /* Only 4 bytes per song for fast index lookup, not 152-byte path arrays.
@@ -166,6 +167,7 @@ void hifi_catalog_close(void)
     active_hashes = hashes_a;
     staging_hashes = hashes_b;
     generation = 0;
+    folders_discovered = 0;
 }
 
 void hifi_catalog_drop_snapshots(void)
@@ -206,6 +208,7 @@ static bool enter_directory(const char *path)
     aster_handle_t dir = 0;
     if (aster_fs_opendir(path, strlen(path), &dir) < 0) return false;
     depth++;
+    folders_discovered++;
     stack[depth].handle = dir;
     aster_snprintf(stack[depth].path, sizeof(stack[depth].path), "%s", path);
     return true;
@@ -305,6 +308,51 @@ static void verify_tick(void)
                  discovered, generation);
 }
 
+/* A full media-tree scan is a deliberate operation, not every APP launch.
+ * An already-published HIF2 generation remains immediately browsable. */
+static bool begin_scan(void)
+{
+    close_stack();
+    if (staging) aster_fs_close(staging);
+    staging = 0;
+    scanning = verifying = false;
+    scan_error = 0;
+    last_stat_log = verify_bytes = 0;
+    folders_discovered = 0;
+    /* Never truncate the active generation before a replacement is validated. */
+    int stage_slot = candidate_slot();
+    (void)aster_fs_mkdir("/data", 5);
+    scan_error = aster_fs_open(paths[stage_slot], strlen(paths[stage_slot]),
+                   ASTER_FS_O_RDWR | ASTER_FS_O_CREAT | ASTER_FS_O_TRUNC,
+                   &staging);
+    if (scan_error < 0) return false;
+    cat_header_t blank = {0};
+    if (!write_exact(staging, &blank, sizeof(blank))) {
+        scan_error = ASTER_EIO;
+        finish_scan(false);
+        return false;
+    }
+    record_crc = 0xffffffffu;
+    sig_xor = sig_sum = discovered = 0;
+    if (!enter_directory("/music")) {
+        scan_error = ASTER_ENOENT;
+        finish_scan(false);
+        return false;
+    }
+    scanning = true;
+    aster_printf("HiFi catalog scan start cached=%u",
+                 has_saved ? committed.count : 0);
+    return true;
+}
+
+void hifi_catalog_rescan(void)
+{
+    /* A user refresh keeps the old published generation and its folder/tag
+     * snapshots available until a new checked HIF2 generation is committed. */
+    if (scanning || verifying) return;
+    (void)begin_scan();
+}
+
 void hifi_catalog_start(void)
 {
     hifi_catalog_close();
@@ -327,29 +375,13 @@ void hifi_catalog_start(void)
         if (ha) aster_fs_close(ha);
     }
     has_saved = active != 0;
-    /* Never truncate the published slot before the replacement is complete. */
-    int stage_slot = candidate_slot();
-    (void)aster_fs_mkdir("/data", 5);
-    scan_error = aster_fs_open(paths[stage_slot], strlen(paths[stage_slot]),
-                   ASTER_FS_O_RDWR | ASTER_FS_O_CREAT | ASTER_FS_O_TRUNC,
-                   &staging);
-    if (scan_error < 0) return;
-    cat_header_t blank = {0};
-    if (!write_exact(staging, &blank, sizeof(blank))) {
-        scan_error = ASTER_EIO;
-        finish_scan(false);
+    if (has_saved) {
+        aster_printf("HiFi catalog restored tracks=%u generation=%u (no rescan)",
+                     committed.count, generation);
         return;
     }
-    record_crc = 0xffffffffu;
-    sig_xor = sig_sum = discovered = 0;
-    if (!enter_directory("/music")) {
-        scan_error = ASTER_ENOENT;
-        finish_scan(false);
-        return;
-    }
-    scanning = true;
-    aster_printf("HiFi catalog scan start cached=%u",
-                 has_saved ? committed.count : 0);
+    /* No usable generation: build the first library once. */
+    (void)begin_scan();
 }
 
 void hifi_catalog_tick(void)
@@ -472,7 +504,11 @@ hifi_catalog_status_t hifi_catalog_status(void)
         .generation = generation,
         .error = scan_error,
         .scanning = scanning || verifying,
-        .has_saved = has_saved
+        .has_saved = has_saved,
+        .verifying = verifying,
+        .verify_bytes = verify_bytes,
+        .verify_total = discovered * (uint32_t)sizeof(cat_row_t),
+        .folders_discovered = folders_discovered
     };
     return state;
 }
