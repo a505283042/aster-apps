@@ -372,9 +372,12 @@ static bool track_append(const char *name, size_t length)
     if (!copy)
         return false;
     if (track_count == track_capacity) {
+        if (track_capacity > INT_MAX / 2) {
+            free(copy);
+            return false;
+        }
         int next_capacity = track_capacity ? track_capacity * 2 : 64;
-        if (next_capacity <= track_capacity ||
-            (size_t)next_capacity > SIZE_MAX / sizeof(*tracks)) {
+        if ((size_t)next_capacity > SIZE_MAX / sizeof(*tracks)) {
             free(copy);
             return false;
         }
