@@ -1795,6 +1795,7 @@ static void activate(int id)
             notice("4 秒内再点一次，确认完整重扫");
         } else {
             rescan_armed=false;
+            hifi_groups_invalidate_cache();
             hifi_catalog_drop_snapshots();
             scan_start();
             notice("已清除旧索引，正在完整重扫");
@@ -2158,6 +2159,7 @@ ASTER_APP_EXPORT void aster_app_resume(void)
 
 static void cleanup(void)
 {
+    hifi_groups_close();
     scan_close();
     lyrics_close();
     cover_close();
