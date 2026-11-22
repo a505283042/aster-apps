@@ -16,7 +16,7 @@
  */
 #include "music_catalog.h"
 #include <aster_imports.h>
-#include <string.h>
+/* aster_imports.h includes the SDK's freestanding aster_libc.h. */
 
 enum {
     CAT_MAGIC = 0x32464948u, /* "HIF2" */
@@ -65,6 +65,15 @@ static uint32_t hashes_b[HIFI_CATALOG_TRACK_MAX];
 static uint32_t *active_hashes = hashes_a, *staging_hashes = hashes_b;
 static uint32_t active_hash_loaded;
 static bool active_hash_failed;
+
+/* Aster's minimal libc intentionally has no memchr/strnlen imports. */
+static bool path_terminated(const char *text, unsigned capacity)
+{
+    for (unsigned i = 0; i < capacity; ++i)
+        if (text[i] == '\0')
+            return true;
+    return false;
+}
 
 static bool read_exact(aster_handle_t file, void *dst, unsigned size)
 {
@@ -352,7 +361,7 @@ void hifi_catalog_tick(void)
             active_hash_loaded = 0;
         } else {
             for (uint32_t i = 0; i < count; i++) {
-                if (!memchr(group[i].name, 0, sizeof(group[i].name))) {
+                if (!path_terminated(group[i].name, sizeof(group[i].name))) {
                     active_hash_failed = true;
                     active_hash_loaded = 0;
                     break;
@@ -472,7 +481,7 @@ bool hifi_catalog_path_at(uint32_t index, char *out, unsigned capacity)
     cat_row_t row;
     if (pos > INT32_MAX || aster_fs_seek(file, (int32_t)pos, ASTER_FS_SEEK_SET) < 0 ||
         !read_exact(file, &row, sizeof(row)) ||
-        !memchr(row.name, 0, sizeof(row.name)) || row.name[0] == '/' ||
+        !path_terminated(row.name, sizeof(row.name)) || row.name[0] == '/' ||
         !row.name[0])
         return false;
     memcpy(out, row.name, sizeof(row.name));
