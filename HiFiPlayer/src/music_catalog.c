@@ -1,0 +1,369 @@
+/* SPDX-License-Identifier: MIT
+ *
+ * Portable adaptation of the FakePod_S31 V2 Catalog/Manifest lifecycle:
+ * recursive walk, bounded cooperative work, checksummed disk snapshots,
+ * generational publication and old-snapshot retention on scan failure.
+ *
+ * Aster does not expose file mtime or the S31 Catalog allocation APIs.
+ * Therefore this v1 snapshot stores path + size, and detects most changes by
+ * order-independent path+size fingerprints. Same-size in-place file edits may
+ * not be detected until a future firmware metadata API is available.
+ *
+ * All records remain on SD instead of consuming WASM memory for thousands
+ * of fixed 248-byte paths. The 5-row UI is a naturally virtualized reader.
+ */
+#include "music_catalog.h"
+#include <aster_imports.h>
+#include <string.h>
+
+enum {
+    CAT_MAGIC = 0x32464948u, /* "HIF2" */
+    CAT_VERSION = 1,
+    CAT_DEPTH = 8,
+    CAT_STEP_ENTRIES = 8,
+    CAT_STEP_MS = 7
+};
+static const char *const paths[2] = {
+    "/data/hifi_catalog_a.bin", "/data/hifi_catalog_b.bin"
+};
+
+/* Stable disk layout: all header fields are u32, record is exactly 256B.
+ * Deliberately not binary-compatible with ESP-IDF's V2 metadata Catalog. */
+typedef struct {
+    uint32_t magic, version, generation, count;
+    uint32_t payload_crc, signature_xor, signature_sum, flags;
+    uint32_t header_crc;
+} cat_header_t;
+typedef struct {
+    uint64_t size;
+    char name[HIFI_CATALOG_PATH_MAX];
+} cat_row_t;
+
+typedef struct {
+    aster_handle_t handle;
+    char path[256];
+} walk_dir_t;
+
+static walk_dir_t stack[CAT_DEPTH];
+static int depth = -1;
+static aster_handle_t active, staging;
+static cat_header_t committed;
+static uint32_t discovered, record_crc, sig_xor, sig_sum;
+static uint32_t generation;
+static int active_slot = -1;
+static int32_t scan_error;
+static bool scanning, has_saved, published;
+static uint32_t last_stat_log;
+
+static uint32_t crc_step(uint32_t crc, const void *data, unsigned len)
+{
+    const uint8_t *p = data;
+    for (unsigned i = 0; i < len; i++) {
+        crc ^= p[i];
+        for (unsigned k = 0; k < 8; k++)
+            crc = (crc >> 1) ^ (0xedb88320u & (0u - (crc & 1u)));
+    }
+    return crc;
+}
+
+static uint32_t row_fingerprint(const cat_row_t *row)
+{
+    uint32_t crc = crc_step(0xffffffffu, row->name,
+                             (unsigned)strlen(row->name));
+    crc = crc_step(crc, &row->size, sizeof(row->size));
+    return ~crc;
+}
+
+static bool music_extension(const char *name)
+{
+    const char *dot = NULL;
+    for (const char *p = name; *p; p++)
+        if (*p == '.') dot = p;
+    if (!dot) return false;
+    char ext[6] = {0};
+    unsigned len = (unsigned)strlen(dot + 1);
+    if (!len || len >= sizeof(ext)) return false;
+    for (unsigned i = 0; i < len; i++) {
+        char ch = dot[i + 1];
+        ext[i] = ch >= 'A' && ch <= 'Z' ? (char)(ch + ('a' - 'A')) : ch;
+    }
+    return !strcmp(ext, "mp3") || !strcmp(ext, "flac") ||
+           !strcmp(ext, "wav");
+}
+
+static void close_stack(void)
+{
+    while (depth >= 0) {
+        if (stack[depth].handle)
+            aster_fs_closedir(stack[depth].handle);
+        stack[depth].handle = 0;
+        depth--;
+    }
+}
+
+void hifi_catalog_close(void)
+{
+    close_stack();
+    if (staging) aster_fs_close(staging);
+    if (active) aster_fs_close(active);
+    active = staging = 0;
+    active_slot = -1;
+    scanning = has_saved = published = false;
+    discovered = 0;
+    generation = 0;
+}
+
+static int open_valid_snapshot(int slot, cat_header_t *header,
+                               aster_handle_t *handle)
+{
+    aster_handle_t file = 0;
+    aster_stat_t stat = {.size = sizeof(stat), .version = 1};
+    const char *path = paths[slot];
+    if (aster_fs_stat(path, strlen(path), &stat, sizeof(stat)) < 0 ||
+        aster_fs_open(path, strlen(path), ASTER_FS_O_RDONLY, &file) < 0)
+        return 0;
+    int n = aster_fs_read(file, header, sizeof(*header));
+    uint32_t hcrc = ~crc_step(0xffffffffu, header,
+                                     sizeof(*header) - sizeof(header->header_crc));
+    if (n != (int)sizeof(*header) || header->magic != CAT_MAGIC ||
+        header->version != CAT_VERSION || header->count > HIFI_CATALOG_TRACK_MAX ||
+        header->header_crc != hcrc ||
+        stat.filesize != (uint64_t)sizeof(*header) +
+                             (uint64_t)header->count * sizeof(cat_row_t)) {
+        aster_fs_close(file);
+        return 0;
+    }
+    *handle = file;
+    return 1;
+}
+
+static bool enter_directory(const char *path)
+{
+    if (depth + 1 >= CAT_DEPTH) return false;
+    aster_handle_t dir = 0;
+    if (aster_fs_opendir(path, strlen(path), &dir) < 0) return false;
+    depth++;
+    stack[depth].handle = dir;
+    aster_snprintf(stack[depth].path, sizeof(stack[depth].path), "%s", path);
+    return true;
+}
+
+static void finish_scan(bool success)
+{
+    close_stack();
+    scanning = false;
+    if (!staging) return;
+    int stage_slot = active_slot == 0 ? 1 : 0;
+    if (active_slot < 0) stage_slot = 0;
+    if (success && has_saved && committed.count == discovered &&
+        committed.signature_xor == sig_xor &&
+        committed.signature_sum == sig_sum) {
+        /* Same logical path+size set: keep the previous generation. */
+        aster_fs_close(staging);
+        staging = 0;
+        aster_fs_unlink(paths[stage_slot], strlen(paths[stage_slot]));
+        return;
+    }
+    if (!success) {
+        aster_fs_close(staging);
+        staging = 0;
+        aster_fs_unlink(paths[stage_slot], strlen(paths[stage_slot]));
+        return; /* old published Catalog remains valid */
+    }
+    cat_header_t header = {
+        .magic = CAT_MAGIC, .version = CAT_VERSION,
+        .generation = generation + 1u, .count = discovered,
+        .payload_crc = ~record_crc, .signature_xor = sig_xor,
+        .signature_sum = sig_sum, .flags = 0
+    };
+    header.header_crc = ~crc_step(0xffffffffu, &header,
+                           sizeof(header) - sizeof(header.header_crc));
+    if (aster_fs_seek(staging, 0, ASTER_FS_SEEK_SET) < 0 ||
+        aster_fs_write(staging, &header, sizeof(header)) != (int)sizeof(header)) {
+        scan_error = ASTER_EIO;
+        aster_fs_close(staging);
+        staging = 0;
+        aster_fs_unlink(paths[stage_slot], strlen(paths[stage_slot]));
+        return;
+    }
+    if (active) aster_fs_close(active);
+    active = staging;
+    staging = 0;
+    committed = header;
+    active_slot = stage_slot;
+    generation = header.generation;
+    has_saved = published = true;
+    aster_printf("HiFi catalog committed tracks=%u generation=%u",
+                 discovered, generation);
+}
+
+void hifi_catalog_start(void)
+{
+    hifi_catalog_close();
+    scan_error = 0;
+    cat_header_t a = {0}, b = {0};
+    aster_handle_t ha = 0, hb = 0;
+    int va = open_valid_snapshot(0, &a, &ha);
+    int vb = open_valid_snapshot(1, &b, &hb);
+    if (va && (!vb || (int32_t)(a.generation - b.generation) >= 0)) {
+        active = ha;
+        active_slot = 0;
+        committed = a;
+        generation = a.generation;
+        if (hb) aster_fs_close(hb);
+    } else if (vb) {
+        active = hb;
+        active_slot = 1;
+        committed = b;
+        generation = b.generation;
+        if (ha) aster_fs_close(ha);
+    }
+    has_saved = active != 0;
+    /* Never truncate the published slot before the replacement is complete. */
+    int stage_slot = active_slot == 0 ? 1 : 0;
+    if (active_slot < 0) stage_slot = 0;
+    (void)aster_fs_mkdir("/data", 5);
+    scan_error = aster_fs_open(paths[stage_slot], strlen(paths[stage_slot]),
+                   ASTER_FS_O_RDWR | ASTER_FS_O_CREAT | ASTER_FS_O_TRUNC,
+                   &staging);
+    if (scan_error < 0) return;
+    cat_header_t blank = {0};
+    if (aster_fs_write(staging, &blank, sizeof(blank)) != (int)sizeof(blank)) {
+        scan_error = ASTER_EIO;
+        finish_scan(false);
+        return;
+    }
+    record_crc = 0xffffffffu;
+    sig_xor = sig_sum = discovered = 0;
+    if (!enter_directory("/music")) {
+        scan_error = ASTER_ENOENT;
+        finish_scan(false);
+        return;
+    }
+    scanning = true;
+    aster_printf("HiFi catalog scan start cached=%u",
+                 has_saved ? committed.count : 0);
+}
+
+void hifi_catalog_tick(void)
+{
+    if (!scanning) return;
+    uint32_t begun = aster_time_now_ms();
+    for (unsigned i = 0; i < CAT_STEP_ENTRIES && scanning; i++) {
+        if (aster_time_now_ms() - begun >= CAT_STEP_MS) break;
+        if (depth < 0) {
+            finish_scan(true);
+            break;
+        }
+        char name[256] = {0};
+        uint32_t is_dir = 0;
+        int n = aster_fs_dir_next(stack[depth].handle, name,
+                                  sizeof(name) - 1u, &is_dir);
+        if (n < 0) {
+            scan_error = n;
+            finish_scan(false);
+            break;
+        }
+        if (!n) {
+            aster_fs_closedir(stack[depth].handle);
+            stack[depth].handle = 0;
+            depth--;
+            if (depth < 0) finish_scan(true);
+            continue;
+        }
+        if ((unsigned)n >= sizeof(name)) continue;
+        name[n] = 0;
+        if (!strcmp(name, ".") || !strcmp(name, "..") ||
+            name[0] == '.' || !strcmp(name, "_FakePod"))
+            continue;
+        const char *parent = stack[depth].path;
+        unsigned base = (unsigned)strlen(parent);
+        if (base + 1u + (unsigned)n >= sizeof(stack[depth].path))
+            continue;
+        char full[256];
+        aster_snprintf(full, sizeof(full), "%s/%s", parent, name);
+        if (is_dir) {
+            /* Ignore folders deeper than our fixed directory-handle budget. */
+            if (depth + 1 < CAT_DEPTH)
+                (void)enter_directory(full);
+            continue;
+        }
+        if (!music_extension(name)) continue;
+        if (discovered >= HIFI_CATALOG_TRACK_MAX) {
+            scan_error = ASTER_ENOMEM;
+            finish_scan(false);
+            break;
+        }
+        aster_stat_t stat = {.size = sizeof(stat), .version = 1};
+        if (aster_fs_stat(full, strlen(full), &stat, sizeof(stat)) < 0 ||
+            (stat.mode & ASTER_STAT_DIR))
+            continue;
+        cat_row_t row = {0};
+        row.size = stat.filesize;
+        if (strlen(full) <= 7 || strlen(full + 7) >= sizeof(row.name))
+            continue;
+        aster_snprintf(row.name, sizeof(row.name), "%s", full + 7);
+        uint32_t spot = sizeof(cat_header_t) + discovered * sizeof(row);
+        if (spot > INT32_MAX ||
+            aster_fs_seek(staging, (int32_t)spot, ASTER_FS_SEEK_SET) < 0 ||
+            aster_fs_write(staging, &row, sizeof(row)) != (int)sizeof(row)) {
+            scan_error = ASTER_EIO;
+            finish_scan(false);
+            break;
+        }
+        uint32_t h = row_fingerprint(&row);
+        sig_xor ^= h;
+        sig_sum += h * 0x9e3779b1u;
+        record_crc = crc_step(record_crc, &row, sizeof(row));
+        discovered++;
+        if (discovered - last_stat_log >= 256u) {
+            last_stat_log = discovered;
+            aster_printf("HiFi catalog progress=%u", discovered);
+        }
+    }
+}
+
+hifi_catalog_status_t hifi_catalog_status(void)
+{
+    hifi_catalog_status_t state = {
+        .count = active ? committed.count : discovered,
+        .discovered = discovered,
+        .generation = generation,
+        .error = scan_error,
+        .scanning = scanning,
+        .has_saved = has_saved
+    };
+    return state;
+}
+
+bool hifi_catalog_path_at(uint32_t index, char *out, unsigned capacity)
+{
+    if (!out || capacity == 0u) return false;
+    out[0] = 0;
+    aster_handle_t file = active ? active : staging;
+    uint32_t count = active ? committed.count : discovered;
+    if (!file || index >= count || capacity < HIFI_CATALOG_PATH_MAX)
+        return false;
+    uint32_t pos = (uint32_t)sizeof(cat_header_t) + index * (uint32_t)sizeof(cat_row_t);
+    cat_row_t row;
+    if (pos > INT32_MAX || aster_fs_seek(file, (int32_t)pos, ASTER_FS_SEEK_SET) < 0 ||
+        aster_fs_read(file, &row, sizeof(row)) != (int)sizeof(row) ||
+        !memchr(row.name, 0, sizeof(row.name)) || row.name[0] == '/' ||
+        !row.name[0])
+        return false;
+    memcpy(out, row.name, sizeof(row.name));
+    return true;
+}
+
+int32_t hifi_catalog_find(const char *relative)
+{
+    if (!relative || !*relative) return -1;
+    hifi_catalog_status_t stat = hifi_catalog_status();
+    char path[HIFI_CATALOG_PATH_MAX];
+    for (uint32_t i = 0; i < stat.count; i++) {
+        if (hifi_catalog_path_at(i, path, sizeof(path)) &&
+            !strcmp(relative, path))
+            return (int32_t)i;
+    }
+    return -1;
+}
