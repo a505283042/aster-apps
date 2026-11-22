@@ -218,8 +218,59 @@ static void close_files(void)
     input = output = remaining = 0;
 }
 
-static void begin_jpeg(uint32_t offset, uint32_t length, unsigned cap, enum cover_phase fallback)
+/* Optional ABI V2 uses the exact first 40 bytes of the existing
+ * aster_img_render_args_t. Declared locally so an installed SDK 4.5.0 can
+ * still compile HiFi. Old firmware rejects version=2 and keeps TJpgDec.
+ * No new mandatory WASM import or second guest-side cover buffer. */
+typedef struct {
+    uint32_t size, version;
+    uint32_t dst_off, dst_span, cap_w, cap_h, out_w, out_h, flags, reserved;
+    uint32_t src_offset, src_length, dim_off, dim_span, result_flags, reserved2;
+} hifi_cover_hw_args_t;
+_Static_assert(sizeof(hifi_cover_hw_args_t) == 64, "cover V2 ABI size changed");
+_Static_assert(sizeof(aster_img_render_args_t) == 40, "cover V1 ABI prefix changed");
+
+static bool hardware_jpeg(const char *path, uint32_t offset, uint32_t length, unsigned cap)
 {
+    if (!path || !*path || !cap || cap > COVER_EDGE)
+        return false;
+    hifi_cover_hw_args_t args = {
+        .size = sizeof(args),
+        .version = 2,
+        .dst_off = (uint32_t)(uintptr_t)pixels,
+        .dst_span = sizeof(pixels),
+        .dim_off = (uint32_t)(uintptr_t)dim_pixels,
+        .dim_span = sizeof(dim_pixels),
+        .cap_w = cap,
+        .cap_h = cap,
+        .src_offset = offset,
+        .src_length = length
+    };
+    /* The same imported function accepts the larger structure only on new
+     * S31 firmware. Neither destination is modified on a failed V2 call. */
+    if (aster_img_render(path, strlen(path), (aster_img_render_args_t *)&args,
+                         sizeof(args)) < 0 ||
+        !args.out_w || !args.out_h || args.out_w > cap || args.out_h > cap ||
+        !(args.result_flags & 1u))
+        return false;
+    image_w = args.out_w;
+    image_h = args.out_h;
+    phase = IDLE;
+    aster_printf("HiFi cover swap %ux%u backend=JPEG_HW dim=%s\n",
+                 image_w, image_h, (args.result_flags & 2u) ? "PPA" : "CPU");
+    return true;
+}
+
+/* A JPEG sidecar is tried before any music-file embedded APIC/PICTURE.
+ * Hardware failure preserves the old cover while legacy incremental
+ * TJpgDec reads the exact same already-open offset/length region. */
+static bool begin_jpeg(const char *source, uint32_t offset, uint32_t length,
+                       unsigned cap, enum cover_phase fallback)
+{
+    if (hardware_jpeg(source, offset, length, cap)) {
+        close_files();
+        return true;
+    }
     if (cover_jpeg_begin(input, offset, length, cap, staging_pixels, chunk)) {
         jpeg_fallback = fallback;
         phase = JPEG;
@@ -227,6 +278,7 @@ static void begin_jpeg(uint32_t offset, uint32_t length, unsigned cap, enum cove
         close_files();
         phase = fallback;
     }
+    return false;
 }
 
 static void begin_embedded(unsigned cap)
@@ -249,7 +301,7 @@ static void begin_embedded(unsigned cap)
             wave(size, &picture);
     }
     if (picture.jpeg) {
-        begin_jpeg(picture.offset, picture.length, cap, DEFAULT);
+        (void)begin_jpeg(track_path, picture.offset, picture.length, cap, DEFAULT);
         return;
     }
     if (picture.length && aster_fs_seek(input, picture.offset, ASTER_FS_SEEK_SET) >= 0) {
@@ -286,6 +338,14 @@ static bool finish_image(uint32_t w, uint32_t h)
 
 static bool decode_native(const char *path, unsigned cap)
 {
+    /* JPEG default artwork also takes the bounded S31 fast path first.
+     * Non-JPEG PNG/BMP still use the unchanged firmware V1 decoder. */
+    const char *ext = NULL;
+    for (const char *p = path; *p; p++)
+        if (*p == '.') ext = p;
+    if (ext && (!strcmp(ext, ".jpg") || !strcmp(ext, ".jpeg")) &&
+        hardware_jpeg(path, 0, 0, cap))
+        return true;
     aster_img_render_args_t args = {.size = sizeof(args),
                                     .version = 1,
                                     .dst_off = (uint32_t)(uintptr_t)staging_pixels,
@@ -308,9 +368,8 @@ static bool open_image(const char *path, unsigned cap, enum cover_phase fallback
     if (read_at(0, magic, sizeof(magic)) && magic[0] == 255 && magic[1] == 216) {
         aster_stat_t st = {.size = sizeof(st), .version = 1};
         if (aster_fs_stat(path, n, &st, sizeof(st)) == 0 && st.filesize <= INT32_MAX)
-            begin_jpeg(0, (uint32_t)st.filesize, cap, fallback);
-        else
-            close_files();
+            return begin_jpeg(path, 0, (uint32_t)st.filesize, cap, fallback);
+        close_files();
         return false;
     }
     close_files();
@@ -391,7 +450,9 @@ bool cover_tick(unsigned cap)
     }
     if (phase == EMBEDDED) {
         begin_embedded(cap);
-        return false;
+        /* begin_embedded may finish a hardware JPEG synchronously. The
+         * completed pair must redraw on THIS tick, not on a stale frame. */
+        return phase == IDLE;
     }
     if (phase == JPEG) {
         uint32_t w, h;
