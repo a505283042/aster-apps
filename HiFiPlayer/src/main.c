@@ -2096,7 +2096,12 @@ ASTER_APP_EXPORT void aster_app_event(const aster_event_t *event)
         scan_tick();
         uint32_t meta_before=hifi_groups_processed();
         bool meta_was_ready=hifi_groups_ready();
-        hifi_groups_tick(player.state==ASTER_PLAYER_PLAYING);
+        /* Audio stutter is still under investigation: only perform extra
+         * metadata SD reads while browsing the library or playback is idle.
+         * Never probe audio tags in the background of a playing cover or
+         * animated lyrics page. In library, pace at 240 ms per song. */
+        if (page==LIBRARY || player.state!=ASTER_PLAYER_PLAYING)
+            hifi_groups_tick(player.state==ASTER_PLAYER_PLAYING);
         if (page==LIBRARY && library_group_mode() &&
             (hifi_groups_ready()!=meta_was_ready ||
              hifi_groups_processed()/8u!=meta_before/8u)) {
