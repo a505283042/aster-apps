@@ -1783,7 +1783,7 @@ static int hit(int x, int y)
         return SEEK;
     if (page == PLAYBACK && controls_visible) {
         if (can_seek() && x >= 48 && x < 412 && y >= PLAY_PROGRESS - 14 &&
-            y < PLAY_PROGRESS + 24)
+            y < PLAY_PROGRESS + 19)
             return SEEK;
         if (x >= 48 && x < 108 && y >= 382 && y < 442)
             return MODE;
