@@ -879,7 +879,7 @@ static const char *source_label(void)
     if (bluetooth_input())
         return "蓝牙接收";
     if (player.flags & ASTER_PLAYER_F_BT_OUTPUT)
-        return "蓝牙输出";
+        return "蓝牙发射";
     return "有线";
 }
 
@@ -1014,30 +1014,29 @@ static void list_icon(uint16_t color)
     }
 }
 
-static void playback_status_pills(uint16_t white, uint16_t muted_color)
+/* One current audio path, not four competing source/status badges.
+ * FLUX owns output selection; this capsule is read-only and never changes
+ * music routing or system volume. Transient notices keep their toast. */
+static void playback_source_indicator(uint16_t white)
 {
-    /* The fourth slot is a useful playback state when no transient notice
-     * exists. The actual alert text is still shown by the existing toast. */
-    const char *activity = message[0] ? "提示" :
-                           player.state == ASTER_PLAYER_ERROR ? "播放错误" :
-                           player.state == ASTER_PLAYER_PLAYING ? "播放中" :
-                           player.state == ASTER_PLAYER_PAUSED ? "已暂停" :
-                           player.state == ASTER_PLAYER_OPENING ? "加载中" :
-                           player.state == ASTER_PLAYER_STOPPING ? "切换中" :
-                           player.state == ASTER_PLAYER_ENDED ? "已结束" : "待机";
-    const char *const names[] = {"有线", "蓝牙接收", "蓝牙发射", activity};
-    bool active[] = {
-        !bluetooth_input() && !(player.flags & ASTER_PLAYER_F_BT_OUTPUT),
-        bluetooth_input(),
-        !bluetooth_input() && (player.flags & ASTER_PLAYER_F_BT_OUTPUT),
-        message[0] || player.state == ASTER_PLAYER_PLAYING ||
-        player.state == ASTER_PLAYER_ERROR
-    };
-    for (int i = 0; i < 4; ++i) {
-        int x = 22 + i * 105;
-        box(x, 346, 99, 29, 10, active[i] ? RGB(69, 85, 106) : RGB(43, 52, 65), false);
-        text(x + 2, 352, 95, 14, active[i] ? white : muted_color, names[i], CENTER);
+    const char *name = source_label();
+    box(146, 382, 168, 60, 16, RGB(56, 62, 72), false);
+    /* Tiny source glyph drawn as geometry: no dependency on BT icon fonts. */
+    if (bluetooth_input() || (player.flags & ASTER_PLAYER_F_BT_OUTPUT)) {
+        line(182, 392, 182, 413, white);
+        line(182, 392, 193, 400, white);
+        line(193, 400, 174, 415, white);
+        line(174, 398, 193, 415, white);
+        line(193, 415, 182, 423, white);
+        line(182, 423, 182, 413, white);
+    } else {
+        /* Physical cable/plug. */
+        line(177, 400, 177, 413, white);
+        line(188, 400, 188, 413, white);
+        line(173, 413, 192, 413, white);
+        line(182, 413, 182, 424, white);
     }
+    text(199, 400, 106, 20, white, name, CENTER);
 }
 
 static void playback_audio_info(uint16_t secondary)
@@ -1131,12 +1130,11 @@ static void playback(void)
     clock_text(stamp, player.duration_ms);
     text(290, 306, 110, 18, secondary, player.duration_ms ? stamp : "--:--", RIGHT);
 
-    /* Read-only output indicators. Volume belongs to FLUX quick settings,
-     * never an independent APP volume; preserve RX / TX and short notices. */
-    playback_status_pills(white, tertiary);
-
-    /* Symmetric 60x60 mode/list controls, separate from the swipe zone. */
+    /* Bottom triplet: queue mode | currently active audio path | track list.
+     * Only one wired / BT RX / BT TX source is shown. Quick-settings owns
+     * volume, and errors/notifications remain the existing transient toast. */
     box(48, 382, 60, 60, 16, RGB(56, 62, 72), false);
+    playback_source_indicator(white);
     box(352, 382, 60, 60, 16, RGB(56, 62, 72), false);
     mode_icon(white);
     list_icon(white);
