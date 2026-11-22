@@ -7,7 +7,7 @@
 #define HIFI_MUSIC_TAGS_H
 #include <stdbool.h>
 #include <stdint.h>
-enum { HIFI_TAG_TEXT_MAX = 64 };
+enum { HIFI_TAG_TEXT_MAX = 192 };
 typedef struct {
     char title[HIFI_TAG_TEXT_MAX];
     char artist[HIFI_TAG_TEXT_MAX];
