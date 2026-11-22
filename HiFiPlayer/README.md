@@ -1,6 +1,6 @@
 # Aster 音乐
 
-Hi-Fi 播放器 0.4.31，按 FAKE POD NANO PRO 的 460×460 方屏设计，最低固件 ABI 4.5。MP3 播放需要带 MP3 解码的固件。在系统下拉设置连接蓝牙音箱后，支持系统输出切换的固件会将当前歌曲从有线耳机转到音箱，保留播放进度。
+Hi-Fi 播放器 0.5.0-alpha.1，按 FAKE POD NANO PRO 的 460×460 方屏设计，最低固件 ABI 4.5。MP3 播放需要带 MP3 解码的固件。在系统下拉设置连接蓝牙音箱后，支持系统输出切换的固件会将当前歌曲从有线耳机转到音箱，保留播放进度。
 
 - **播放器主界面只有两种状态：**启动直接显示「460×460 压暗封面＋控件」，轻点非控件位置显示原色全屏封面；再轻点返回控件。没有选歌欢迎页，也没有磁带模式。
 - **首次自动选中曲库第一首，不自动启动音频。**以后优先从本 APP 的 KV 持久存储恢复最后选择的歌曲；曲目已删除时改选当前曲库第一首。无封面时优先使用 `/assets/art/no_cover_artwork.jpg`，若未打包则读取 TF 卡 `/music/no_cover_artwork.jpg`，均没有才使用随包旧图 `art/moonlight.bmp`。两种画面由同一份 460×460 解码结果生成，控件切换不重新读取 TF 卡。
@@ -48,3 +48,16 @@ Hi-Fi 播放器 0.4.31，按 FAKE POD NANO PRO 的 460×460 方屏设计，最�
 ## 0.4.31 原色封面显示修复
 
 真机日志中 `HiFi cover view=bright ready=1` 表示触摸状态已切换且封面存在，不能据此判断屏幕已提交。原色封面状态现在完全跳过无控件的 GE 绘制，改走 SDK `aster_surface_present(surface)` 原生整屏提交；控件状态仍走 GE 命令绘制。无封面变化时即使播放时间/状态刷新，原色封面不重复整屏推送；解码成功、点击进入、返回 APP 时会重新提交。串口增加 `HiFi bright native present rc=... ready=...`，若 `cover_paint` 无法取得 Surface 则打印 `HiFi bright fallback rc=...`，用以区分 Surface 路径错误。
+
+
+## S31 完整复刻第一阶段：Aster V2 文件曲库（0.5.0-alpha.1）
+
+**保留：** 原有艺术歌词、动态歌词、摇一摇、封面解码及 Aster 系统播放器服务，本阶段不触碰固件及硬解接口。
+
+**已接入：** 基于 S31 V2 Catalog/Manifest 生命周期规则改写的 Aster C 曲库模块 `src/music_catalog.c`。它每帧在预算内扫描 `/music` 的子目录、过滤隐藏文件与 `_FakePod`、读取 MP3/FLAC/WAV、生成路径+文件大小的持久化索引；最多存储 16,384 首，UI 继续使用五行虚拟窗口、分页，不再有 64 首限制。
+
+索引位于 APP 沙盒 `/data/hifi_catalog_a.bin` 和 `/data/hifi_catalog_b.bin`，即 TF 卡的 `aster/apps/aster.hifi/data/`；两个交替槽位有版本、generation、条目 CRC32、Header CRC32 和顺序无关的 path+size 变化摘要。新索引先写空闲槽、分帧校验刚写出的负载 CRC 后才切换；断电、扫描失败或文件写入失败时仍使用旧快照。已有索引会先用于展示，后台逐步完整扫描校验新增/删除路径，无变化时不提升 generation。
+
+**限制与下一阶段：** 这是 Aster 格式，不直接覆盖原 S31 `/System/library` 的 V2 二进制；Aster 4.5 的 `aster_fs_stat` 没有 mtime，因此同路径且大小不变的文件原地覆盖可能不会触发快照变化；扫描顺序暂沿文件系统枚举顺序，排序/歌手/专辑/年代分组、完整播放上下文与随机历史、封面预热将在后续阶段移植。深层目录超过 8 层时扫描拒绝提交不完整快照。退出 APP 后系统播放器后台仍不提供完整的连续队列，需后续配套固件 API。没有使用 ESP-IDF 或 Zephyr 私有函数。
+
+验证：`aster build HiFiPlayer --target riscv --aot`、`aster verify HiFiPlayer/dist/riscv/aster.hifi.ast`，再安装到 SD。观察串口 `HiFi catalog scan start cached=...` / `HiFi catalog progress=...` / `HiFi catalog committed tracks=...`。首次索引构建分帧完成，大容量音乐卡会比旧 64 首扫描更久；未通过实机验证前不要合并主分支。
