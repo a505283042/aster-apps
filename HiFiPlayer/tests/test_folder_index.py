@@ -115,9 +115,15 @@ bool hifi_catalog_path_at(uint32_t index,char *out,unsigned size)
         checks = r'''
 static void drive_until_ready(void)
 {
-    for(int i=0;i<20000&&!hifi_browser_ready();i++)
+    /* Wait not just for in-memory browse readiness, but for the verified,
+     * committed on-disk HFD1 header to be published. */
+    for(int i=0;i<20000;i++){
+        hifi_browser_progress_t p=hifi_browser_progress();
+        if(p.stage==HIFI_BROWSER_READY && p.ready)return;
+        assert(!p.error);
         hifi_browser_tick();
-    assert(hifi_browser_ready() && !hifi_browser_error());
+    }
+    assert(!"folder snapshot did not finish");
 }
 int main(int argc,char **argv)
 {
