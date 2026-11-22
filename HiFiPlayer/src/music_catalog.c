@@ -553,3 +553,32 @@ int32_t hifi_catalog_find(const char *relative)
     }
     return -1;
 }
+
+/* Called ONLY by NEXT/PREV while playback is idle. HIF2 can be browsable
+ * immediately after boot, even when its 4-byte-per-song hash table has not
+ * finished incremental hydration. Scan in 16-row batches here, once per
+ * user action, so the selected song is not silently mistaken for track 0.
+ * Leave the active file positioned anywhere: catalog_tick/path_at always
+ * perform their own absolute seek. No persistent extra RAM is allocated. */
+int32_t hifi_catalog_find_for_idle_step(const char *relative)
+{
+    int32_t known=hifi_catalog_find(relative);
+    if (known>=0 || hifi_catalog_lookup_ready() || !active ||
+        !relative || !*relative) return known;
+    uint32_t hash=name_hash(relative);
+    for (uint32_t first=0;first<committed.count;first+=16u) {
+        cat_row_t rows[16];
+        uint32_t count=committed.count-first;
+        if (count>16u) count=16u;
+        uint32_t pos=(uint32_t)sizeof(cat_header_t)+first*(uint32_t)sizeof(cat_row_t);
+        if (pos>INT32_MAX || aster_fs_seek(active,(int32_t)pos,ASTER_FS_SEEK_SET)<0 ||
+            !read_exact(active,rows,count*(uint32_t)sizeof(cat_row_t)))
+            return -1;
+        for (uint32_t i=0;i<count;i++) {
+            if (path_terminated(rows[i].name,sizeof(rows[i].name)) &&
+                name_hash(rows[i].name)==hash && !strcmp(relative,rows[i].name))
+                return (int32_t)(first+i);
+        }
+    }
+    return -1;
+}
