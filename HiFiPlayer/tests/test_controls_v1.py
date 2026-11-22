@@ -31,7 +31,7 @@ class HiFiControlsV1(unittest.TestCase):
         self.assertIn("box(60, PLAY_PROGRESS, 340, 10", playback)
         self.assertIn("circle(60 + filled, PLAY_PROGRESS + 5", playback)
         self.assertIn("PLAY_PROGRESS - 14", hit)
-        self.assertIn("PLAY_PROGRESS + 24", hit)
+        self.assertIn("PLAY_PROGRESS + 19", hit)
 
     def test_playlist_button_symmetric_with_mode(self):
         playback = between("static void playback(void)", "static int next_lyric_group(")
