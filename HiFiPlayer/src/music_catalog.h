@@ -35,4 +35,7 @@ bool hifi_catalog_path_at(uint32_t index, char *out, unsigned capacity);
 bool hifi_catalog_lookup_ready(void);
 /* O(n) in 4-byte hashes, with an SD read only for rare hash matches. */
 int32_t hifi_catalog_find(const char *relative_path);
+/* Explicit idle-only lookup while HIF2 hashes are still hydrating. This
+ * sequentially reads disk rows in 16-song batches, never on draw/poll. */
+int32_t hifi_catalog_find_for_idle_step(const char *relative_path);
 #endif
