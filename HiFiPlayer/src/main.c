@@ -516,10 +516,11 @@ static void scan_tick(void)
             library_page=track_count ? (track_count-1)/ROWS : 0;
         dirty=true;
     }
-    if(page==LIBRARY && status.scanning && !status.has_saved &&
+    if(page==LIBRARY && status.scanning &&
        (status.discovered/16u != scan_progress_drawn/16u ||
-        status.verify_bytes/4096u != scan_verify_drawn/4096u ||
-        status.verifying && !scan_verify_drawn))
+        (!status.has_saved &&
+         (status.verify_bytes/4096u != scan_verify_drawn/4096u ||
+          (status.verifying && !scan_verify_drawn)))))
         dirty=true;
     scan_progress_drawn=status.discovered;
     scan_verify_drawn=status.verify_bytes;
@@ -1555,7 +1556,10 @@ static void library(void)
                  scan_error<0 ? "建库失败，请检查 TF 卡后点击重扫" :
                                 "准备建立曲库索引",CENTER);
         }
-        text(35,303,390,16,muted,"完成基础索引后即可播放；标签随后整理",CENTER);
+        text(35,303,390,16,muted,
+             player.state==ASTER_PLAYER_PLAYING ?
+             "播放中已暂停索引，暂停音乐后继续" :
+             "完成基础索引后即可播放；标签随后整理",CENTER);
     } else if (folder_view && !folders.ready) {
         if (folders.error) {
             text(26,200,408,19,ink,"目录索引出错，请重新启动 APP",CENTER);
@@ -1567,6 +1571,8 @@ static void library(void)
                        folders.stage==HIFI_BROWSER_SAVING ?
                        "正在保存目录索引" : "首次建立文件夹目录索引";
             text(26,192,408,20,ink,stage,CENTER);
+            if(player.state==ASTER_PLAYER_PLAYING)
+                text(26,299,408,16,muted,"暂停音乐后继续加载目录索引",CENTER);
             if(folders.total) {
                 aster_snprintf(temp,sizeof(temp),"%u / %u",folders.done,folders.total);
                 text(26,226,408,18,muted,temp,CENTER);
