@@ -2,7 +2,7 @@
 id = "aster.hifi"
 name = "Aster 音乐"
 description = "S31 全屏封面双状态播放器，支持本地音乐、歌词与蓝牙音频。"
-version = "0.5.0-alpha.4"
+version = "0.5.0-alpha.5"
 abi = "4.5.0"
 abi_min = "4.5"
 aot = true
@@ -15,7 +15,7 @@ max_memory = 4194304
 heap = 1048576
 requires = ["display", "touch", "media-player"]
 supported_boards = ["fakepod-s31"]
-permissions = ["fs", "kv"]
+permissions = ["fs", "kv", "sd"]
 sources = ["src/main.c", "src/music_catalog.c", "src/music_browser.c", "src/music_tags.c", "src/music_groups.c", "src/lrc.c", "src/flac_lyrics.c", "src/cover.c", "src/cover_jpeg.c",
            "vendor/tjpgd/tjpgd.c", "src/paper.c", "src/paper_font.c", "src/lyric_layout.c", "src/shake.c"]
 icon = "icon.bin"
@@ -23,8 +23,6 @@ assets = [
     "audio/demo.flac",
     "art/moonlight.bmp",
     "text/gbk.bin",
-    "text/paper-serif.bin",
-    "text/paper-bold.bin",
     "text/paper-serif-OFL.txt",
     "text/paper-bold-OFL.txt",
 ]
