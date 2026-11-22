@@ -40,6 +40,7 @@ enum control {
     LIB_FOLDERS,
     LIB_RESCAN,
     MODE,
+    PLAY_LIST,
     PAGE_PREV,
     PAGE_NEXT,
     TRACK_FIRST
@@ -57,7 +58,7 @@ enum {
     LIBRARY_PAGER = ROW_TOP + ROWS * ROW_H,
     PLAY_SEEK_X = 60,
     PLAY_SEEK_W = 340,
-    PLAY_PROGRESS = 264,
+    PLAY_PROGRESS = 286,
     PANEL_X = 254,
     PANEL_Y = 301,
     PANEL_W = 184,
@@ -173,6 +174,9 @@ static struct {
 static enum { SEEK_IDLE, SEEK_DRAG, SEEK_WAIT } seeking;
 
 static uint32_t seek_position, seek_deadline;
+
+/* Global HIF2 catalog ID, not the current library filter or folder row. */
+static int current_index(void);
 
 static int sx(int x)
 {
@@ -968,31 +972,97 @@ static void fallback_art(uint16_t base)
     circle(174, 105, 8, RGB(195, 231, 250));
 }
 
-/* Four modes. A shaded label indicates the firmware is authoritative.
- * Bluetooth input remains controlled by the connected phone. */
+/* FakePod_S31-style line icons. Never depend on a missing Unicode glyph.
+ * The four global queue modes belong to firmware, not the library page. */
 static void mode_icon(uint16_t white)
 {
     if (bluetooth_input()) {
-        line(68, 363, 91, 387, white);
-        line(91, 363, 68, 387, white);
+        /* The connected phone owns its playback mode. */
+        line(67, 393, 90, 414, white);
+        line(90, 393, 67, 414, white);
+    } else if (playback_mode == ORDER_SEQUENCE) {
+        line(64, 402, 93, 402, white);
+        triangle(88, 396, 98, 402, 88, 408, white);
     } else if (playback_mode == ORDER_SHUFFLE) {
-        line(60, 362, 67, 362, white);
-        line(67, 362, 91, 387, white);
-        line(87, 387, 94, 387, white);
-        triangle(89, 383, 98, 387, 89, 391, white);
-        line(60, 387, 67, 387, white);
-        line(67, 387, 91, 362, white);
-        triangle(89, 358, 98, 362, 89, 366, white);
+        line(64, 394, 69, 394, white);
+        line(69, 394, 90, 413, white);
+        line(90, 413, 95, 413, white);
+        triangle(91, 409, 99, 413, 91, 417, white);
+        line(64, 413, 69, 413, white);
+        line(69, 413, 90, 394, white);
+        line(90, 394, 95, 394, white);
+        triangle(91, 390, 99, 394, 91, 398, white);
     } else {
-        line(61, 369, 94, 369, white);
-        triangle(90, 364, 99, 369, 90, 374, white);
-        line(94, 384, 61, 384, white);
-        triangle(65, 379, 56, 384, 65, 389, white);
+        line(65, 394, 93, 394, white);
+        triangle(89, 390, 98, 394, 89, 398, white);
+        line(95, 405, 95, 409, white);
+        line(93, 413, 65, 413, white);
+        triangle(69, 409, 60, 413, 69, 417, white);
+        line(63, 403, 63, 399, white);
         if (playback_mode == ORDER_REPEAT_ONE)
-            text(68, 367, 22, 16, white, "1", CENTER);
-        else if (playback_mode == ORDER_SEQUENCE)
-            text(68, 367, 22, 16, white, "→", CENTER);
+            text(69, 397, 20, 14, white, "1", CENTER);
     }
+}
+
+static void list_icon(uint16_t color)
+{
+    /* Three rows + their dots, mirroring FakePod's hand-drawn controls. */
+    for (int i = 0; i < 3; ++i) {
+        int y = 393 + i * 9;
+        circle(366, y, 2, color);
+        line(374, y, 398, y, color);
+    }
+}
+
+static void playback_status_pills(uint16_t white, uint16_t muted_color)
+{
+    const char *const names[] = {"有线", "蓝牙接收", "蓝牙发射", "提示"};
+    bool active[] = {
+        !bluetooth_input() && !(player.flags & ASTER_PLAYER_F_BT_OUTPUT),
+        bluetooth_input(),
+        !bluetooth_input() && (player.flags & ASTER_PLAYER_F_BT_OUTPUT),
+        (message[0] != 0) || player.state == ASTER_PLAYER_ERROR
+    };
+    for (int i = 0; i < 4; ++i) {
+        int x = 22 + i * 105;
+        box(x, 346, 99, 29, 10, active[i] ? RGB(69, 85, 106) : RGB(43, 52, 65), false);
+        text(x + 2, 352, 95, 14, active[i] ? white : muted_color, names[i], CENTER);
+    }
+}
+
+static void playback_audio_info(uint16_t secondary)
+{
+    const char *codec = bluetooth_input() ? "SBC" : format(display_track());
+    char rate[40] = {0};
+    char params[112] = {0};
+    if (player.rate) {
+        uint32_t hz = player.rate;
+        if (hz % 1000u == 0)
+            aster_snprintf(rate, sizeof(rate), "%ukHz", hz / 1000u);
+        else
+            aster_snprintf(rate, sizeof(rate), "%u.%ukHz",
+                           hz / 1000u, (hz % 1000u + 50u) / 100u);
+        if (player.bits) {
+            char sample[40];
+            aster_snprintf(sample, sizeof(sample), "%s / %ubit", rate, player.bits);
+            aster_snprintf(rate, sizeof(rate), "%s", sample);
+        }
+    }
+    int index = bluetooth_input() ? -1 : current_index();
+    if (index >= 0 && track_count > 0) {
+        if (*rate)
+            aster_snprintf(params, sizeof(params), "%04u / %u · %s · %s",
+                           (unsigned)(index + 1), (unsigned)track_count, codec, rate);
+        else
+            aster_snprintf(params, sizeof(params), "%04u / %u · %s",
+                           (unsigned)(index + 1), (unsigned)track_count, codec);
+    } else if (*codec && *rate)
+        aster_snprintf(params, sizeof(params), "%s · %s", codec, rate);
+    else if (*codec)
+        aster_snprintf(params, sizeof(params), "%s · %s", codec, playback_state());
+    else
+        aster_snprintf(params, sizeof(params), "%s", playback_state());
+    text(25, 94, 410, 17, secondary, params, CENTER);
 }
 
 /* Two fully distinct album states on one persistent 460x460 image cache:
@@ -1005,7 +1075,7 @@ static void playback(void)
     const uint16_t tertiary = RGB(156, 166, 180);
     const uint16_t dark = RGB(20, 27, 36);
     const uint16_t bar = RGB(90, 94, 103);
-    char name[256], params[64], stamp[24];
+    char name[256], stamp[24];
 
     if (cover_paint(surface, left, top, content_w, base, controls_visible))
         aster_ge_touch(&gfx, 0, 0, width, height);
@@ -1019,15 +1089,7 @@ static void playback(void)
     text(36, 26, 388, 30, white, title(name), CENTER);
     const char *by = artist();
     text(40, 61, 380, 21, secondary, *by ? by : source_label(), CENTER);
-    const char *codec = bluetooth_input() ? "SBC" : format(display_track());
-    if (player.rate)
-        aster_snprintf(params, sizeof(params), "%s / %u Hz / %u bit", codec,
-                       player.rate, player.bits);
-    else if (*codec)
-        aster_snprintf(params, sizeof(params), "%s · %s", codec, playback_state());
-    else
-        aster_snprintf(params, sizeof(params), "%s", playback_state());
-    text(25, 94, 410, 17, tertiary, params, CENTER);
+    playback_audio_info(tertiary);
 
     circle(132, 194, 37, RGB(90, 95, 105));
     circle(328, 194, 37, RGB(90, 95, 105));
@@ -1053,19 +1115,26 @@ static void playback(void)
     if (can_seek())
         circle(60 + filled, PLAY_PROGRESS + 5, 9, white);
     clock_text(stamp, pos);
-    text(60, 279, 110, 18, secondary, has_position() ? stamp : "--:--", LEFT);
+    text(60, 306, 110, 18, secondary, has_position() ? stamp : "--:--", LEFT);
     clock_text(stamp, player.duration_ms);
-    text(290, 279, 110, 18, secondary, player.duration_ms ? stamp : "--:--", RIGHT);
+    text(290, 306, 110, 18, secondary, player.duration_ms ? stamp : "--:--", RIGHT);
 
-    /* No local volume controls: use the system top-pull-down volume instead. */
-    box(48, 346, 66, 77, 18, RGB(56, 62, 72), false);
+    /* Read-only output indicators. Volume belongs to FLUX quick settings,
+     * never an independent APP volume; preserve RX / TX and short notices. */
+    playback_status_pills(white, tertiary);
+
+    /* Symmetric 60x60 mode/list controls, separate from the swipe zone. */
+    box(48, 382, 60, 60, 16, RGB(56, 62, 72), false);
+    box(352, 382, 60, 60, 16, RGB(56, 62, 72), false);
     mode_icon(white);
-    const char *mode_name = bluetooth_input() ? "不可用" :
+    list_icon(white);
+    const char *mode_name = bluetooth_input() ? "手机" :
                             firmware_auto_next() && !firmware_queue_mode() ? "固件" :
                             playback_mode == ORDER_SHUFFLE ? "随机" :
                             playback_mode == ORDER_REPEAT_ONE ? "单曲" :
                             playback_mode == ORDER_REPEAT_ALL ? "全部" : "顺序";
-    text(48, 399, 66, 17, white, mode_name, CENTER);
+    text(48, 421, 60, 14, white, mode_name, CENTER);
+    text(352, 421, 60, 14, white, "列表", CENTER);
 }
 
 static int next_lyric_group(int first)
@@ -1665,9 +1734,12 @@ static void draw(uint32_t now)
         break;
     }
     if (message[0] && !(page == PLAYBACK && !controls_visible)) {
-        box(32, 271, 396, 47, 11, panel, false);
-        box(32, 271, 396, 47, 11, border, true);
-        text(44, 283, 372, 18, ink, message, CENTER);
+        /* The playback seek rail moved to y=286; never cover it with a toast. */
+        const int ty = page == PLAYBACK ? 122 : 271;
+        const int th = page == PLAYBACK ? 33 : 47;
+        box(32, ty, 396, th, 11, panel, false);
+        box(32, ty, 396, th, 11, border, true);
+        text(44, ty + (page == PLAYBACK ? 7 : 12), 372, 18, ink, message, CENTER);
     }
     int result = aster_ge_present(&gfx);
     if (result < 0) {
@@ -1710,10 +1782,13 @@ static int hit(int x, int y)
     if (page == LYRICS && can_seek() && y >= LYRIC_SEEK_TOP && y < CONTENT_END)
         return SEEK;
     if (page == PLAYBACK && controls_visible) {
-        if (can_seek() && x >= 48 && x < 412 && y >= 249 && y < 289)
+        if (can_seek() && x >= 48 && x < 412 && y >= PLAY_PROGRESS - 14 &&
+            y < PLAY_PROGRESS + 24)
             return SEEK;
-        if (x >= 48 && x < 114 && y >= 346 && y < 423)
+        if (x >= 48 && x < 108 && y >= 382 && y < 442)
             return MODE;
+        if (x >= 352 && x < 412 && y >= 382 && y < 442)
+            return PLAY_LIST;
         if (x >= 95 && x < 169 && y >= 157 && y < 231)
             return PREVIOUS;
         if (x >= 291 && x < 365 && y >= 157 && y < 231)
@@ -1937,6 +2012,16 @@ static void activate(int id)
             playback_mode=(enum playback_order)target;
         }
         break;
+    case PLAY_LIST: {
+        /* Always open the global queue and focus the current Catalog ID.
+         * A folder/group filter is only a browsing view, not a second queue. */
+        int active = current_index();
+        library_mode = LIBRARY_ALL_TRACKS;
+        library_detail_group = -1;
+        library_page = active >= 0 ? active / ROWS : 0;
+        set_page(LIBRARY);
+        break;
+    }
     case PAGE_PREV:
         change_library_page(-1);
         break;
