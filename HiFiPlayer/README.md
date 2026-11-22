@@ -101,6 +101,25 @@ Hi-Fi 播放器 0.5.0-alpha.1，按 FAKE POD NANO PRO 的 460×460 方屏设计�
 
 
 ## 0.5.0-alpha.5：艺术歌词字库共享，瘦身 APP 安装包
+**推荐：一次 USB 会话完成全部更新。**先更新和编译 APP，再进入 USB 读卡器模式，复制字库和安装包一次性安全弹出，无需重复拔插 TF 卡。
+
+```powershell
+. "D:\ESP32\aster-sdk-4.5.0\env.ps1"
+cd D:\ESP32\aster-apps
+git pull --ff-only origin feat/hifi-s31-full-port
+aster build HiFiPlayer --target riscv --aot
+aster verify HiFiPlayer/dist/riscv/aster.hifi.ast
+```
+
+设备进入「USB 读卡器」后，假设 Windows 盘符为 `E:\`：
+
+```powershell
+cd D:\ESP32\aster-apps
+.\HiFiPlayer\tools\install_shared_fonts.ps1 -Drive E:\ -Package .\HiFiPlayer\dist\riscv\aster.hifi.ast
+```
+
+脚本会检查真实 `aster` 卡目录，把字体与许可证复制到共享目录，并以 SHA256 校验。随后复制同一版 AST 安装包到 `aster/install`，验证完毕后请在 Windows 安全弹出，再从设备端安装 `/SD:/aster/install/aster.hifi.ast`。以后更新 APP 再运行同一脚本，未变化的字库会跳过。
+
 
 **已经过实机验证的 USB MSC 模式可用**：Windows 识别卡、读写、弹出后返回设备桌面、APP 安装启动四项均由使用者确认。
 
