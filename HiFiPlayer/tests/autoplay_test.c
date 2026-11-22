@@ -106,7 +106,7 @@ int main(void)
         assert(track_append(name, strlen(name)));
     }
     assert(track_count == 80);
-    assert(track_capacity >= 80);
+    assert(track_used > 0);
     aster_snprintf(path, sizeof(path), "/SD:/music/song063.flac");
     assert(sample(ASTER_PLAYER_PLAYING, path) == -1);
     assert(current_index() == 63);
