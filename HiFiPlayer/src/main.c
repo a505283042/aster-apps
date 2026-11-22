@@ -11,15 +11,13 @@ enum page { LYRICS, PLAYBACK, LIBRARY, PAPER };
 
 enum control {
     NONE,
-    CLOSE,
-    VOLUME,
+    BACK,
     SEEK,
     PREVIOUS,
     TOGGLE,
     NEXT,
     DEMO,
     MODE,
-    MUTE,
     PAGE_PREV,
     PAGE_NEXT,
     TRACK_FIRST
@@ -35,9 +33,6 @@ enum {
     ROW_TOP = 108,
     ROW_H = 57,
     LIBRARY_PAGER = ROW_TOP + ROWS * ROW_H,
-    VOLUME_X = 123,
-    VOLUME_W = 214,
-    VOLUME_Y = 374,
     PLAY_SEEK_X = 60,
     PLAY_SEEK_W = 340,
     PLAY_PROGRESS = 264,
@@ -69,12 +64,11 @@ static uint32_t width, height, content_w, content_h;
 static int left, top;
 static aster_player_info_t player;
 static uint32_t last_poll, visible_second;
-static int volume, library_page, track_count, scan_error;
+static int library_page, track_count, scan_error;
 static bool dirty, library_scanned, controls_visible = true;
 enum playback_order { ORDER_NORMAL, ORDER_REPEAT, ORDER_SHUFFLE };
 static enum playback_order playback_mode = ORDER_NORMAL;
 static uint32_t shuffle_seed = 0x6b7b3d29;
-static int volume_before_mute = 40;
 static enum page page = PLAYBACK;
 static char tracks[TRACK_LIMIT][248], current_file[256], queued_file[256];
 static char playing_track[sizeof(current_file)];
@@ -723,6 +717,12 @@ static void set_page(enum page target)
     }
     page = target;
     lyric_animating = false;
+    if (target == PLAYBACK) {
+        controls_visible = true;
+        sync_media(); /* Refresh the album selection before returning home. */
+    }
+    /* Invalidate the whole surface after navigating away from another page. */
+    aster_ge_touch(&gfx, 0, 0, width, height);
     if (target == LIBRARY && library_scanned && !track_count)
         scan_start();
     dirty = true;
@@ -811,17 +811,17 @@ static const char *playback_state(void)
 static void frame_chrome(void)
 {
     if (page == PLAYBACK)
-        return; /* No close X over either full-screen artwork state. */
+        return; /* Both full-cover states are pure album art backgrounds. */
     aster_ge_clear(&gfx, background);
-    if (page == LYRICS)
-        return;
     if (page == LIBRARY) {
         text(22, 17, 173, 24, ink, "本地曲库", LEFT);
         text(260, 20, 109, 18, muted, source_label(), RIGHT);
-        box(386, 9, 55, 46, 12, finger.control == CLOSE ? panel : chrome, false);
     }
-    line(405, 23, 423, 41, muted);
-    line(423, 23, 405, 41, muted);
+    /* Lyrics and library share an explicit return-to-player button. */
+    box(382, 9, 67, 46, 12, finger.control == BACK ? panel : chrome, false);
+    line(408, 22, 398, 32, ink);
+    line(398, 32, 408, 42, ink);
+    line(398, 32, 429, 32, ink);
 }
 
 static void clock_text(char out[24], uint32_t ms)
@@ -870,19 +870,33 @@ static void fallback_art(uint16_t base)
     circle(174, 105, 8, RGB(195, 231, 250));
 }
 
-static void playback_slider(int x, int y, int w, int fill, uint16_t track, uint16_t accent,
-                            bool knob)
+/* Three geometric transport-mode icons: playlist, repeat-one and shuffle.
+ * The stored mode continues to determine natural-end playback order. */
+static void mode_icon(uint16_t white)
 {
-    box(x, y, w, 4, 2, track, false);
-    if (fill)
-        box(x, y, fill, 4, 2, accent, false);
-    if (knob)
-        circle(x + fill, y + 2, 6, accent);
+    if (bluetooth_input()) {
+        line(68, 363, 91, 387, white);
+        line(91, 363, 68, 387, white);
+    } else if (playback_mode == ORDER_SHUFFLE) {
+        line(60, 362, 67, 362, white);
+        line(67, 362, 91, 387, white);
+        line(87, 387, 94, 387, white);
+        triangle(89, 383, 98, 387, 89, 391, white);
+        line(60, 387, 67, 387, white);
+        line(67, 387, 91, 362, white);
+        triangle(89, 358, 98, 362, 89, 366, white);
+    } else {
+        line(61, 369, 94, 369, white);
+        triangle(90, 364, 99, 369, 90, 374, white);
+        line(94, 384, 61, 384, white);
+        triangle(65, 379, 56, 384, 65, 389, white);
+        if (playback_mode == ORDER_REPEAT)
+            text(68, 367, 22, 16, white, "1", CENTER);
+    }
 }
 
-/* The original FakePod_S31 player_home overlay geometry, ported to Aster GE.
- * Default is dimmed artwork + controls; background tap reveals clean artwork.
- * The two views share one decoded 460x460 source and never start audio on tap. */
+/* Two fully distinct album states on one persistent 460x460 image cache:
+ * (1) dim artwork + controls, (2) unmodified bright artwork only. */
 static void playback(void)
 {
     const uint16_t base = RGB(14, 23, 36);
@@ -896,9 +910,9 @@ static void playback(void)
     if (cover_paint(surface, left, top, content_w, base, controls_visible))
         aster_ge_touch(&gfx, 0, 0, width, height);
     else
-        fallback_art(base);
+        fallback_art(controls_visible ? base : RGB(47, 77, 109));
 
-    /* Full artwork mode has no controls and no invisible transport hit boxes. */
+    /* Cover-only mode must not draw any UI or retain old hit targets. */
     if (!controls_visible)
         return;
 
@@ -906,21 +920,18 @@ static void playback(void)
     const char *by = artist();
     text(40, 61, 380, 21, secondary, *by ? by : source_label(), CENTER);
     const char *codec = bluetooth_input() ? "SBC" : format(display_track());
-    if (player.rate) {
+    if (player.rate)
         aster_snprintf(params, sizeof(params), "%s / %u Hz / %u bit", codec,
                        player.rate, player.bits);
-    } else if (*codec) {
+    else if (*codec)
         aster_snprintf(params, sizeof(params), "%s · %s", codec, playback_state());
-    } else {
+    else
         aster_snprintf(params, sizeof(params), "%s", playback_state());
-    }
     text(25, 94, 410, 17, tertiary, params, CENTER);
 
-    /* Transport: previous/next 74px, main play/pause 94px. */
     circle(132, 194, 37, RGB(90, 95, 105));
     circle(328, 194, 37, RGB(90, 95, 105));
     circle(230, 194, 47, RGB(233, 236, 240));
-    /* Distinct, legible previous / next icons on the muted circular buttons. */
     box(119, 182, 5, 24, 1, white, false);
     triangle(126, 194, 145, 182, 145, 206, white);
     triangle(315, 182, 335, 194, 315, 206, white);
@@ -932,7 +943,6 @@ static void playback(void)
         triangle(216, 174, 253, 194, 216, 214, dark);
     }
 
-    /* Seek bar, 340px × 10px, matching the reference center alignment. */
     box(60, PLAY_PROGRESS, 340, 10, 5, bar, false);
     uint32_t pos = position();
     if (player.duration_ms && pos > player.duration_ms)
@@ -947,23 +957,13 @@ static void playback(void)
     clock_text(stamp, player.duration_ms);
     text(290, 279, 110, 18, secondary, player.duration_ms ? stamp : "--:--", RIGHT);
 
-    /* Original bottom-row anchors: mode x48, volume x123..337, mute/status.
-     * Cassette and a second song-select start page are intentionally absent. */
-    box(48, 346, 60, 60, 18, RGB(56, 62, 72), false);
-    const char *mode_name = bluetooth_input() ? "X" :
+    /* No local volume controls: use the system top-pull-down volume instead. */
+    box(48, 346, 66, 77, 18, RGB(56, 62, 72), false);
+    mode_icon(white);
+    const char *mode_name = bluetooth_input() ? "不可用" :
                             playback_mode == ORDER_SHUFFLE ? "随机" :
                             playback_mode == ORDER_REPEAT ? "单曲" : "顺序";
-    text(48, 362, 60, 21, white, mode_name, CENTER);
-    box(123, VOLUME_Y, VOLUME_W, 9, 5, bar, false);
-    int volume_fill = clamp(volume, 0, 100) * VOLUME_W / 100;
-    if (volume_fill)
-        box(VOLUME_X, VOLUME_Y, volume_fill, 9, 5, white, false);
-    circle(VOLUME_X + volume_fill, VOLUME_Y + 4, 9, white);
-    box(86, 319, 120, 28, 14, RGB(49, 57, 67), false);
-    aster_snprintf(params, sizeof(params), "%d%%", volume);
-    text(106, 321, 80, 21, white, params, CENTER);
-    box(352, 346, 60, 60, 18, RGB(56, 62, 72), false);
-    text(352, 362, 60, 22, white, volume ? "音量" : "静音", CENTER);
+    text(48, 399, 66, 17, white, mode_name, CENTER);
 }
 
 static int next_lyric_group(int first)
@@ -1184,7 +1184,7 @@ static void lyric_page(uint32_t now)
 {
     char name[256];
     const char *by = artist();
-    text(30, 18, 400, 24, ink, bluetooth_input() ? "蓝牙实时歌词" : title(name), LEFT);
+    text(30, 18, 343, 24, ink, bluetooth_input() ? "蓝牙实时歌词" : title(name), LEFT);
     text(30, 49, 400, 16, muted, by, LEFT);
     if (!lyrics.count) {
         const char *heading = bluetooth_input() ? "等待手机发送歌词"
@@ -1419,8 +1419,9 @@ static int hit(int x, int y)
 {
     if (page == PAPER)
         return NONE;
-    if (page == LIBRARY && y >= 4 && y < HEADER_END && x >= 378 && x < DESIGN)
-        return CLOSE;
+    if ((page == LIBRARY || page == LYRICS) && y >= 4 && y < HEADER_END &&
+        x >= 378 && x < DESIGN)
+        return BACK;
     if (page == LIBRARY) {
         if (y >= HEADER_END && y < ROW_TOP && x >= 288 && x < DESIGN)
             return DEMO;
@@ -1435,16 +1436,10 @@ static int hit(int x, int y)
     if (page == LYRICS && can_seek() && y >= LYRIC_SEEK_TOP && y < CONTENT_END)
         return SEEK;
     if (page == PLAYBACK && controls_visible) {
-        if (x >= 123 && x < 337 && y >= 360 && y < 397)
-            return VOLUME;
         if (can_seek() && x >= 48 && x < 412 && y >= 249 && y < 289)
             return SEEK;
-        if (x >= 48 && x < 108 && y >= 346 && y < 406)
+        if (x >= 48 && x < 114 && y >= 346 && y < 423)
             return MODE;
-        if (x >= 86 && x < 206 && y >= 315 && y < 347)
-            return MUTE;
-        if (x >= 352 && x < 412 && y >= 346 && y < 406)
-            return MUTE;
         if (x >= 95 && x < 169 && y >= 157 && y < 231)
             return PREVIOUS;
         if (x >= 291 && x < 365 && y >= 157 && y < 231)
@@ -1579,8 +1574,8 @@ static void change_library_page(int step)
 static void activate(int id)
 {
     switch (id) {
-    case CLOSE:
-        aster_app_exit(0);
+    case BACK:
+        set_page(PLAYBACK);
         break;
     case DEMO:
         queue_track("/assets/audio/demo.flac");
@@ -1594,14 +1589,6 @@ static void activate(int id)
         {
             uint32_t saved = playback_mode;
             aster_kv_set(mode_kv_key, sizeof(mode_kv_key) - 1, &saved, sizeof(saved));
-        }
-        break;
-    case MUTE:
-        if (volume) {
-            volume_before_mute = volume;
-            aster_audio_set_volume(0);
-        } else {
-            aster_audio_set_volume(volume_before_mute ? volume_before_mute : 40);
         }
         break;
     case PAGE_PREV:
@@ -1648,11 +1635,7 @@ static void activate(int id)
 
 static void slider(int id, int x)
 {
-    if (id == VOLUME) {
-        int next = clamp((x - VOLUME_X) * 100 / VOLUME_W, 0, 100);
-        if (volume != next && aster_audio_set_volume(next) >= 0)
-            volume = next;
-    } else if (id == SEEK && can_seek()) {
+    if (id == SEEK && can_seek()) {
         int start = page == PLAYBACK ? PLAY_SEEK_X : PROGRESS_X;
         int span = page == PLAYBACK ? PLAY_SEEK_W : PROGRESS_W;
         seek_position = (uint32_t)((uint64_t)player.duration_ms * clamp(x - start, 0, span) / span);
@@ -1673,7 +1656,7 @@ static void touch(const aster_event_t *event)
         finger.y = y;
         finger.control = hit(x, y);
         finger.page_swipe =
-            page_swipe_area(y) && finger.control != VOLUME && finger.control != DEMO;
+            page_swipe_area(y) && finger.control != DEMO;
         if (finger.control == SEEK)
             slider(SEEK, x);
         dirty = true;
@@ -1684,7 +1667,7 @@ static void touch(const aster_event_t *event)
     int dx = x - finger.x, dy = y - finger.y;
     int ax = abs_i(dx), ay = abs_i(dy);
     int id = finger.control;
-    bool is_slider = id == VOLUME || id == SEEK;
+    bool is_slider = id == SEEK;
     if (!page_swipe_area(y))
         finger.page_swipe = false;
     if (ax > 12 || ay > 12) {
@@ -1733,6 +1716,9 @@ static void touch(const aster_event_t *event)
     } else if (!finger.moved && page == PLAYBACK && id == NONE && hit(x, y) == NONE) {
         /* A true background tap switches between exactly two home states. */
         controls_visible = !controls_visible;
+        aster_ge_touch(&gfx, 0, 0, width, height);
+        aster_printf("HiFi cover view=%s cover_ready=%u",
+                     controls_visible ? "controls" : "bright", (unsigned)cover_ready());
     } else if (!finger.moved && id != NONE && hit(x, y) == id)
         activate(id);
     dirty = true;
@@ -1775,11 +1761,6 @@ static void poll(uint32_t now)
             start_queued(now);
     }
     sync_media();
-    int next_volume = aster_audio_get_volume();
-    if (next_volume >= 0 && next_volume != volume) {
-        volume = clamp(next_volume, 0, 100);
-        dirty = true;
-    }
 }
 
 ASTER_APP_EXPORT int aster_app_init(void)
@@ -1800,8 +1781,6 @@ ASTER_APP_EXPORT int aster_app_init(void)
     if (result < 0)
         return result;
     player_sample_at = aster_time_now_ms();
-    int initial_volume = aster_audio_get_volume();
-    volume = initial_volume < 0 ? 40 : clamp(initial_volume, 0, 100);
     aster_surface_desc_t desc = {.size = sizeof(desc),
                                  .version = 1,
                                  .width = width,
