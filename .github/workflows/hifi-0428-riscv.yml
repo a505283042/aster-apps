@@ -58,6 +58,11 @@ jobs:
             HiFiPlayer/tests/library_scan_test.c aster-sdk/lib/aster/aster_printf.c \
             -o /tmp/hifi-library-scan-test
           /tmp/hifi-library-scan-test
+          gcc -std=c11 -O1 -Wno-attributes -I aster-sdk/include -I aster-sdk/lib/aster \
+            -I HiFiPlayer/src HiFiPlayer/tests/cover_jpeg_test.c \
+            HiFiPlayer/src/cover_jpeg.c HiFiPlayer/vendor/tjpgd/tjpgd.c \
+            -o /tmp/hifi-cover-jpeg-test
+          /tmp/hifi-cover-jpeg-test
 
       - name: Build AOT APP 0.4.29
         run: |
