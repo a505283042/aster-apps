@@ -1,6 +1,6 @@
 # Aster 音乐
 
-Hi-Fi 播放器 0.4.30，按 FAKE POD NANO PRO 的 460×460 方屏设计，最低固件 ABI 4.5。MP3 播放需要带 MP3 解码的固件。在系统下拉设置连接蓝牙音箱后，支持系统输出切换的固件会将当前歌曲从有线耳机转到音箱，保留播放进度。
+Hi-Fi 播放器 0.4.31，按 FAKE POD NANO PRO 的 460×460 方屏设计，最低固件 ABI 4.5。MP3 播放需要带 MP3 解码的固件。在系统下拉设置连接蓝牙音箱后，支持系统输出切换的固件会将当前歌曲从有线耳机转到音箱，保留播放进度。
 
 - **播放器主界面只有两种状态：**启动直接显示「460×460 压暗封面＋控件」，轻点非控件位置显示原色全屏封面；再轻点返回控件。没有选歌欢迎页，也没有磁带模式。
 - **首次自动选中曲库第一首，不自动启动音频。**以后优先从本 APP 的 KV 持久存储恢复最后选择的歌曲；曲目已删除时改选当前曲库第一首。无封面时优先使用 `/assets/art/no_cover_artwork.jpg`，若未打包则读取 TF 卡 `/music/no_cover_artwork.jpg`，均没有才使用随包旧图 `art/moonlight.bmp`。两种画面由同一份 460×460 解码结果生成，控件切换不重新读取 TF 卡。
@@ -43,3 +43,8 @@ Hi-Fi 播放器 0.4.30，按 FAKE POD NANO PRO 的 460×460 方屏设计，最�
 ## 自定义无封面图（本次上传的 460×460 JPEG）
 
 将用户提供的 `no_cover_artwork.jpg` 放入 TF 卡 `music/no_cover_artwork.jpg`，APP 即会在歌曲缺少专辑封面时使用它，不必更改歌曲文件名或修改固件。也可放入 `HiFiPlayer/art/no_cover_artwork.jpg` 并在本地 `app.toml` 的 `assets` 列表添加 `"art/no_cover_artwork.jpg"` 以随 APP 打包；若还未复制此文件，切勿将其加入资源列表，否则编译会提示找不到资源。旧的 `moonlight.bmp` 保留兼容。
+
+
+## 0.4.31 原色封面显示修复
+
+真机日志中 `HiFi cover view=bright ready=1` 表示触摸状态已切换且封面存在，不能据此判断屏幕已提交。原色封面状态现在完全跳过无控件的 GE 绘制，改走 SDK `aster_surface_present(surface)` 原生整屏提交；控件状态仍走 GE 命令绘制。无封面变化时即使播放时间/状态刷新，原色封面不重复整屏推送；解码成功、点击进入、返回 APP 时会重新提交。串口增加 `HiFi bright native present rc=... ready=...`，若 `cover_paint` 无法取得 Surface 则打印 `HiFi bright fallback rc=...`，用以区分 Surface 路径错误。
