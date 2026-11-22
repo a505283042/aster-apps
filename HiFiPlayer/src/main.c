@@ -87,6 +87,7 @@ static int left, top;
 static aster_player_info_t player;
 static uint32_t last_poll, visible_second;
 static int library_page, track_count, scan_error;
+static uint32_t scan_progress_drawn;
 enum library_mode { LIBRARY_ALL_TRACKS, LIBRARY_ARTISTS, LIBRARY_ALBUMS,
                     LIBRARY_DECADES, LIBRARY_FOLDER_TREE };
 static enum library_mode library_mode = LIBRARY_ALL_TRACKS;
@@ -466,56 +467,64 @@ static void scan_close(void)
 static void scan_start(void)
 {
     hifi_catalog_start();
-    hifi_catalog_status_t status = hifi_catalog_status();
-    track_count = (int)status.count;
-    catalog_generation = status.generation;
-    library_page = 0;
-    scan_error = status.error;
-    library_scanned = !status.scanning || status.has_saved;
-    lookup_was_ready = hifi_catalog_lookup_ready();
-    library_detail_group = -1;
+    hifi_catalog_status_t status=hifi_catalog_status();
+    track_count=status.has_saved ? (int)status.count : 0;
+    catalog_generation=status.generation;
+    library_page=0;
+    scan_error=status.error;
+    library_scanned=status.has_saved;
+    lookup_was_ready=hifi_catalog_lookup_ready();
+    library_detail_group=-1;
     hifi_groups_start();
-    /* A cached catalog is immediately browsable while SD scanning continues. */
-    if (status.has_saved) settle_scan_selection();
-    if (library_mode == LIBRARY_FOLDER_TREE)
-        hifi_browser_open("");
+    hifi_browser_start();
+    /* Existing HIF2 is immediately browsable; no full TF tree rescan. */
+    if(status.has_saved)settle_scan_selection();
+    if(library_mode==LIBRARY_FOLDER_TREE)hifi_browser_open("");
 }
 
 static void scan_tick(void)
 {
-    hifi_catalog_tick();
-    if (page == LIBRARY && library_mode == LIBRARY_FOLDER_TREE) {
-        uint32_t count_before = hifi_browser_count();
-        bool busy_before = hifi_browser_busy();
+    /* Never run bulk HIF2/HFD1 filesystem tasks concurrently with audio. */
+    if(player.state!=ASTER_PLAYER_PLAYING)
+        hifi_catalog_tick();
+    hifi_browser_progress_t before=hifi_browser_progress();
+    if(player.state!=ASTER_PLAYER_PLAYING)
         hifi_browser_tick();
-        if (count_before != hifi_browser_count() || busy_before != hifi_browser_busy())
-            dirty = true;
+    hifi_browser_progress_t after=hifi_browser_progress();
+    if(page==LIBRARY && (before.ready!=after.ready ||
+       before.error!=after.error || before.stage!=after.stage ||
+       before.done/16u!=after.done/16u))dirty=true;
+
+    hifi_catalog_status_t status=hifi_catalog_status();
+    int prior=track_count;
+    bool was_scanned=library_scanned;
+    uint32_t old_generation=catalog_generation;
+    track_count=status.has_saved ? (int)status.count : 0;
+    catalog_generation=status.generation;
+    if(old_generation!=catalog_generation) {
+        library_detail_group=-1;
+        library_page=0;
     }
-    hifi_catalog_status_t status = hifi_catalog_status();
-    int prior = track_count;
-    bool was_scanned = library_scanned;
-    uint32_t old_generation = catalog_generation;
-    track_count = (int)status.count;
-    catalog_generation = status.generation;
-    if (old_generation != catalog_generation)
-        library_detail_group = -1;
-    scan_error = status.error;
-    library_scanned = !status.scanning || status.has_saved;
-    bool lookup_ready = hifi_catalog_lookup_ready();
-    bool lookup_became_ready = lookup_ready && !lookup_was_ready;
-    lookup_was_ready = lookup_ready;
-    if (prior != track_count || was_scanned != library_scanned ||
-        old_generation != catalog_generation || lookup_became_ready) {
-        if (library_page >= (track_count + ROWS - 1) / ROWS)
-            library_page = track_count ? (track_count - 1) / ROWS : 0;
-        dirty = true;
+    scan_error=status.error;
+    library_scanned=status.has_saved;
+    bool lookup_ready=hifi_catalog_lookup_ready();
+    bool lookup_became_ready=lookup_ready && !lookup_was_ready;
+    lookup_was_ready=lookup_ready;
+    if(prior!=track_count || was_scanned!=library_scanned ||
+       old_generation!=catalog_generation || lookup_became_ready) {
+        if(library_page >= (track_count + ROWS - 1) / ROWS)
+            library_page=track_count ? (track_count-1)/ROWS : 0;
+        dirty=true;
     }
-    if (!selected_file[0] && track_count && !bluetooth_input()) {
+    if(page==LIBRARY && status.scanning && !status.has_saved &&
+       status.discovered/16u != scan_progress_drawn/16u)dirty=true;
+    scan_progress_drawn=status.discovered;
+    if(!selected_file[0] && track_count && !bluetooth_input()) {
         char first[256];
-        if (index_path(0, first, sizeof(first))) select_track(first);
+        if(index_path(0,first,sizeof(first)))select_track(first);
     }
-    if (library_scanned && lookup_ready &&
-        (old_generation != catalog_generation || !was_scanned || lookup_became_ready))
+    if(library_scanned && lookup_ready &&
+       (old_generation!=catalog_generation || !was_scanned || lookup_became_ready))
         settle_scan_selection();
 }
 
@@ -798,8 +807,7 @@ static void set_page(enum page target)
     }
     /* Invalidate the whole surface after navigating away from another page. */
     aster_ge_touch(&gfx, 0, 0, width, height);
-    if (target == LIBRARY && library_scanned && !track_count)
-        scan_start();
+    /* Empty published library is valid; browsing does not trigger rescan. */
     dirty = true;
 }
 
@@ -1777,6 +1785,10 @@ static void queue_track(const char *path)
 
 static void play_index(int index)
 {
+    if (!hifi_catalog_status().has_saved) {
+        notice("首次索引完成后才能播放曲库");
+        return;
+    }
     if (index < 0 || index >= track_count)
         return;
     char path[256];
@@ -1828,10 +1840,12 @@ static void activate(int id)
             notice("4 秒内再点一次，确认完整重扫");
         } else {
             rescan_armed=false;
-            hifi_groups_invalidate_cache();
-            hifi_catalog_drop_snapshots();
-            scan_start();
-            notice("已清除旧索引，正在完整重扫");
+            if (hifi_catalog_status().scanning) {
+                notice("已有扫描正在进行");
+            } else {
+                hifi_catalog_rescan();
+                notice("后台更新曲库，旧索引继续可用");
+            }
         }
         break;
     }
@@ -1925,19 +1939,10 @@ static void activate(int id)
                 if (!entry.folder) {
                     play_index((int)entry.track_index);
                 } else {
-                    const char *parent = hifi_browser_folder();
-                    size_t n = strlen(parent), k = strlen(entry.name);
-                    char target[HIFI_CATALOG_PATH_MAX];
-                    if (n + k + (n ? 1u : 0u) >= sizeof(target)) {
-                        notice("文件夹路径过长");
-                        break;
-                    }
-                    if (n)
-                        aster_snprintf(target, sizeof(target), "%s/%s", parent, entry.name);
+                    if (!hifi_browser_enter_folder(entry.folder_id))
+                        notice("文件夹索引无效或路径过长");
                     else
-                        aster_snprintf(target, sizeof(target), "%s", entry.name);
-                    hifi_browser_open(target);
-                    library_page = 0;
+                        library_page=0;
                 }
             }
         }
