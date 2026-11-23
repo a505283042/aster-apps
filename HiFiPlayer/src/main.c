@@ -778,6 +778,45 @@ static void sync_media(void)
     dirty = true;
 }
 
+/* Cover JPEG reads compete with native FLAC reads on the same TF card.
+ * The cover is decorative; never make the first seconds of a new song wait
+ * for SD/JPEG/PPA. Keep the previous art until the new decode completes.
+ * Only local playback uses this gate: AVRCP remote cover is unchanged. */
+enum { COVER_AUDIO_START_GUARD_MS = 750, COVER_AUDIO_POSITION_MS = 1000 };
+static char cover_io_track[sizeof(current_file)];
+static uint32_t cover_playing_since;
+static bool cover_playing_seen;
+
+static bool cover_io_allowed(uint32_t now)
+{
+    if (bluetooth_input() || player.mode != ASTER_PLAYER_LOCAL)
+        return true;
+    const char *track = display_track();
+    if (strcmp(cover_io_track, track)) {
+        aster_snprintf(cover_io_track, sizeof(cover_io_track), "%s", track);
+        cover_playing_seen = false;
+        cover_playing_since = now;
+    }
+    if (player.state == ASTER_PLAYER_OPENING ||
+        player.state == ASTER_PLAYER_STOPPING) {
+        cover_playing_seen = false;
+        return false;
+    }
+    if (player.state == ASTER_PLAYER_PLAYING) {
+        if (!cover_playing_seen) {
+            cover_playing_since = now;
+            cover_playing_seen = true;
+        }
+        /* Both conditions matter: elapsed wall time alone does not prove
+         * PCM reached the output after a slow SD/decoder startup. */
+        return player.position_ms >= COVER_AUDIO_POSITION_MS &&
+               (uint32_t)(now - cover_playing_since) >= COVER_AUDIO_START_GUARD_MS;
+    }
+    cover_playing_seen = false;
+    /* PAUSED/IDLE/ENDED: no real-time local PCM producer to protect. */
+    return true;
+}
+
 static uint32_t position(void)
 {
     if (seeking != SEEK_IDLE && !bluetooth_input())
@@ -2463,7 +2502,9 @@ ASTER_APP_EXPORT void aster_app_event(const aster_event_t *event)
         }
         lyrics_tick(now);
         paper_tick(now);
-        if (cover_tick(DESIGN) && page == PLAYBACK) {
+        /* Defer cover SD/JPEG/PPA until the new native audio stream has
+         * reached stable PLAYING, not merely requested OPENING. */
+        if (cover_io_allowed(now) && cover_tick(DESIGN) && page == PLAYBACK) {
             bright_pending = true;
             dirty = true;
         }

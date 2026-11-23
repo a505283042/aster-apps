@@ -276,3 +276,29 @@ aster verify HiFiPlayer/dist/riscv/aster.hifi.ast
 源码级测试：`python -m unittest HiFiPlayer/tests/test_cover_stage_b.py HiFiPlayer/tests/test_controls_v1.py`。构建/验证仍为 `aster build HiFiPlayer --target riscv --aot` 与 `aster verify HiFiPlayer/dist/riscv/aster.hifi.ast`。成功安装后观察串口 `HiFi cover swap ... backend=JPEG_HW dim=PPA`；若只看到旧的 `HiFi cover swap ...`，说明使用软件回退（需检查固件版本及硬解日志）。
 
 **本轮代码已提交云端，尚未运行用户 Windows ESP-IDF 编译和实机测试。**
+
+## 0.5.0-alpha.11：音频优先的封面加载（APP-only）
+
+针对切歌后刚开始播放时出现的短暂卡顿/爆音，确认原逻辑在每帧执行 `cover_tick()`，会在新曲 `OPENING` 阶段访问 TF 封面，并在随后立即触发同步的 JPEG 硬解/PPA 转换，与系统音频读取共用 TF/PSRAM 资源。
+
+此版本**仅修改 HiFiPlayer APP** 的封面调度，不需要升级 Aster 固件，也不修改 CS43131/I2S、LCD 双缓冲、音频解码器或封面尺寸：
+
+- 新本地曲目尚处于 `OPENING` / `STOPPING` 时不做任何新的封面读盘与 JPEG 处理。
+- 进入 `PLAYING` 后同时满足“本曲连续播放已观察到至少 **750 ms**”和“实际播放进度至少 **1000 ms**”，才恢复正常的封面逐帧加载。
+- 期间继续显示上一张封面；新封面完整解码后再原子切换，不会闪默认占位图。
+- 暂停、停止、未播放时仍允许正常加载封面；手机 AVRCP 封面不受此开关限制。
+- 该调整使封面不能挤占音频**起播窗口**。若封面 JPEG 本身造成播放中卡顿，则需进一步在固件侧限制封面 TF 读取的最长占卡时间，本版本不宣称已完全消除故障。
+
+构建新的 `aster.hifi.ast` 并重新安装 APP 即可验证，无需重刷设备固件：
+
+```powershell
+cd D:\ESP32\aster-apps
+git fetch origin
+git switch -c feat/hifi-cover-audio-priority-20261123 --track origin/feat/hifi-cover-audio-priority-20261123
+python -m unittest discover -s HiFiPlayer/tests -p "test_cover_audio_priority.py" -v
+. "D:\ESP32\aster-sdk-4.5.0\env.ps1"
+aster build HiFiPlayer --target riscv --aot
+aster verify HiFiPlayer/dist/riscv/aster.hifi.ast
+```
+
+保留先前已安装的 .ast 文件，可直接重新安装恢复旧版。下一步关注“切歌头 1 秒声音是否连续”，不必重复 LCD FPS 测试。
