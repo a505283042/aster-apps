@@ -19,6 +19,12 @@ static enum cover_phase phase, jpeg_fallback;
 static unsigned extension_index;
 static uint32_t remote_revision;
 static bool selected_initialized;
+static bool audio_priority;
+
+void cover_set_audio_priority(bool active)
+{
+    audio_priority = active;
+}
 
 struct picture {
     uint32_t offset, length;
@@ -267,7 +273,11 @@ static bool hardware_jpeg(const char *path, uint32_t offset, uint32_t length, un
 static bool begin_jpeg(const char *source, uint32_t offset, uint32_t length,
                        unsigned cap, enum cover_phase fallback)
 {
-    if (hardware_jpeg(source, offset, length, cap)) {
+    /* A synchronous JPEG HW + PSRAM/PPA operation can occupy 100+ ms.
+     * Keep the native fast path when idle/paused; while local music plays,
+     * TJpgDec yields after bounded MCU slices and shares the existing file
+     * handle, leaving the audio worker frequent opportunities for SD I/O. */
+    if (!audio_priority && hardware_jpeg(source, offset, length, cap)) {
         close_files();
         return true;
     }

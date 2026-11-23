@@ -6,6 +6,9 @@
 #include <aster_imports.h>
 
 void cover_select(const char *track);
+/* Real-time local audio takes priority over synchronous JPEG hardware.
+ * Call once per APP frame before cover_tick(). */
+void cover_set_audio_priority(bool active);
 void cover_select_remote(const char *path, uint32_t revision);
 bool cover_tick(unsigned cap);
 void cover_close(void);

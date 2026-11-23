@@ -28,6 +28,7 @@ class CoverAudioPriority(unittest.TestCase):
         event = MAIN[MAIN.index("ASTER_APP_EXPORT void aster_app_event("):
                      MAIN.index("ASTER_APP_EXPORT void aster_app_pause(")]
         self.assertIn("cover_io_allowed(now) && cover_tick(DESIGN)", event)
+        self.assertIn("cover_set_audio_priority(player.mode == ASTER_PLAYER_LOCAL", event)
         self.assertEqual(event.count("cover_tick(DESIGN)"), 1)
         self.assertIn("cover_select(path);", MAIN)
         self.assertIn("Keep the previous art until the new decode completes", MAIN)
@@ -38,6 +39,10 @@ class CoverAudioPriority(unittest.TestCase):
         self.assertIn("static uint16_t dim_pixels[COVER_EDGE * COVER_EDGE]", COVER)
         self.assertIn("bool cover_tick(unsigned cap)", COVER)
         self.assertIn('version = "0.5.0-alpha.11"', TOML)
+        self.assertIn("void cover_set_audio_priority(bool active)", COVER)
+        self.assertIn("if (!audio_priority && hardware_jpeg(source, offset, length, cap))", COVER)
+        self.assertIn("cover_jpeg_begin(input, offset, length, cap, staging_pixels, chunk)", COVER)
+        self.assertIn("SLICE_MS = 10", (ROOT / "src/cover_jpeg.c").read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":

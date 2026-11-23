@@ -2510,6 +2510,11 @@ ASTER_APP_EXPORT void aster_app_event(const aster_event_t *event)
         }
         lyrics_tick(now);
         paper_tick(now);
+        /* During native music playback, use the existing incremental JPEG
+         * decoder instead of a synchronous S31 JPEG/PPA transaction.
+         * This changes cover scheduling only, never the audio pipeline. */
+        cover_set_audio_priority(player.mode == ASTER_PLAYER_LOCAL &&
+                                 player.state == ASTER_PLAYER_PLAYING);
         /* Defer cover SD/JPEG/PPA until the new native audio stream has
          * reached stable PLAYING, not merely requested OPENING. */
         if (cover_io_allowed(now) && cover_tick(DESIGN) && page == PLAYBACK) {
