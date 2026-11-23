@@ -3,7 +3,16 @@
 #include <aster_imports.h>
 #include "../vendor/tjpgd/tjpgd.h"
 
-enum { READ_AHEAD = 4096, SLICE_MS = 10 };
+/* FakePod_S31 reference: 2/4/8 KB cooperative artwork SD slices.
+ * Aster does not yet have a readable FLAC prefetch-ring watermark, so only
+ * adopt the bounded small reads here; do not copy the 90% threshold. */
+enum { READ_AHEAD = 4096, PLAYING_READ_CHUNK = 2048,
+       IDLE_SLICE_MS = 10, PLAYING_SLICE_MS = 2 };
+static bool audio_priority;
+void cover_jpeg_set_audio_priority(bool active)
+{
+    audio_priority = active;
+}
 static JDEC decoder;
 static struct {
     aster_handle_t file;
@@ -38,7 +47,10 @@ static size_t read_stream(JDEC *jd, uint8_t *dst, size_t n)
             unsigned left = stream.end - stream.next;
             if (!left)
                 break;
-            unsigned want = left < READ_AHEAD ? left : READ_AHEAD;
+            /* Never hold a large SD read in one APP frame while audio plays.
+             * This is a best-effort cap per fs_read, not a ring-aware gate. */
+            unsigned limit = audio_priority ? PLAYING_READ_CHUNK : READ_AHEAD;
+            unsigned want = left < limit ? left : limit;
             int got = aster_fs_read(stream.file, stream.cache, want);
             if (got <= 0 || (unsigned)got > want)
                 break;
@@ -151,6 +163,7 @@ int cover_jpeg_step(uint32_t *width, uint32_t *height)
             *height = out_h;
             return 1;
         }
-    } while (aster_time_now_ms() - start < SLICE_MS);
+    } while ((uint32_t)(aster_time_now_ms() - start) <
+             (audio_priority ? PLAYING_SLICE_MS : IDLE_SLICE_MS));
     return 0;
 }

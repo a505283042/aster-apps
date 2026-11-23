@@ -24,6 +24,7 @@ static bool audio_priority;
 void cover_set_audio_priority(bool active)
 {
     audio_priority = active;
+    cover_jpeg_set_audio_priority(active);
 }
 
 struct picture {

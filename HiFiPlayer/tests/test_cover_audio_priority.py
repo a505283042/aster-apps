@@ -42,7 +42,14 @@ class CoverAudioPriority(unittest.TestCase):
         self.assertIn("void cover_set_audio_priority(bool active)", COVER)
         self.assertIn("if (!audio_priority && hardware_jpeg(source, offset, length, cap))", COVER)
         self.assertIn("cover_jpeg_begin(input, offset, length, cap, staging_pixels, chunk)", COVER)
-        self.assertIn("SLICE_MS = 10", (ROOT / "src/cover_jpeg.c").read_text(encoding="utf-8"))
+        sliced = (ROOT / "src/cover_jpeg.c").read_text(encoding="utf-8")
+        self.assertIn("PLAYING_READ_CHUNK = 2048", sliced)
+        self.assertIn("PLAYING_SLICE_MS = 2", sliced)
+        self.assertIn("IDLE_SLICE_MS = 10", sliced)
+        self.assertIn("audio_priority ? PLAYING_READ_CHUNK : READ_AHEAD", sliced)
+        self.assertIn("audio_priority ? PLAYING_SLICE_MS : IDLE_SLICE_MS", sliced)
+        self.assertIn("cover_jpeg_set_audio_priority(active);", COVER)
+        self.assertIn("cover_jpeg_set_audio_priority(bool active)", (ROOT / "src/cover_jpeg.h").read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":

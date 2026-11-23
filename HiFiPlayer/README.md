@@ -303,3 +303,18 @@ aster verify HiFiPlayer/dist/riscv/aster.hifi.ast
 ```
 
 保留先前已安装的 .ast 文件，可直接重新安装恢复旧版。下一步关注“切歌头 1 秒声音是否连续”，不必重复 LCD FPS 测试。
+
+### FakePod_S31 封面调度参考：渐进式移植（本提交）
+
+参考源代码：
+- `FakePod_S31/src/assets/artwork_loader.cpp`：低优先级封面任务、2/4/8KB 读取窗口、FLAC 压缩环水位 90/92/96% 阈值与最新请求取消。
+- `FakePod_S31/src/ui/artwork/cover_surface_cache.cpp`：独立 CoverSurfaceTask、HW JPEG、正常/压暗两张 460×460 RGB565 Surface，完成后原子发布。
+- `FakePod_S31/src/audio/sources/buffered_sd_audio_source.cpp`：192KB 音频预读环，8KB 读块，64KB 起播缓冲（适用 MP3/WAV）。
+
+Aster 固件的 `aster_audio_decoder_read` 当前仍直接读 TF；尚无对 APP 开放的 FLAC 压缩环水位，因此**不能照搬 90% 阈值**。此次只移植不会改变音频 ABI 的低风险部分：
+- 本地音乐 `PLAYING` 时软件 TJpgDec 的 TF `aster_fs_read` 单次最多 **2KB**（空闲继续 4KB）；每帧目标最多 **2ms** MCU 工作（空闲仍 10ms）。
+- `OPENING`、`STOPPING` 与起播窗口仍暂停封面；曲目更新时会取消旧封面文件，显示旧封面直到新封面完整。
+- 暂未移植 FakePod_S31 的 FLAC 预取环、SD 非阻塞全局 mutex、独立 ArtworkTask/CoverSurfaceTask。由于 Aster 没有这些原语，本修改是风险可控的过渡优化，**不声称完全复制 FakePod_S31 的无卡顿保障**。
+- 仍在暂停/空闲走已有的 460×460 HW JPEG/PPA 快路径。后续如要保持播放中的硬解速度，应在**固件**提供“本地音频预取环 + 后台封面任务 + 完成回调/查询”并保证 APP 关闭时取消任务，不能在 WASM 主线程同步等待。
+
+提示：2ms 是软件逐帧检查的预算，不保证单个 MCU 或单次文件系统操作的实际耗时绝不超出 2ms。
