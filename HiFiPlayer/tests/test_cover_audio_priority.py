@@ -14,6 +14,8 @@ class CoverAudioPriority(unittest.TestCase):
                     MAIN.index("static uint32_t position(")]
         self.assertIn("bluetooth_input() || player.mode != ASTER_PLAYER_LOCAL", gate)
         self.assertIn("strcmp(cover_io_track, track)", gate)
+        self.assertIn("COVER_AUDIO_CHANGE_GUARD_MS", gate)
+        self.assertIn("(uint32_t)(now - cover_changed_since)", gate)
         self.assertIn("cover_playing_seen = false;", gate)
         self.assertIn("player.state == ASTER_PLAYER_OPENING", gate)
         self.assertIn("player.state == ASTER_PLAYER_STOPPING", gate)

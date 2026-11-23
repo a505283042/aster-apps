@@ -283,7 +283,7 @@ aster verify HiFiPlayer/dist/riscv/aster.hifi.ast
 
 此版本**仅修改 HiFiPlayer APP** 的封面调度，不需要升级 Aster 固件，也不修改 CS43131/I2S、LCD 双缓冲、音频解码器或封面尺寸：
 
-- 新本地曲目尚处于 `OPENING` / `STOPPING` 时不做任何新的封面读盘与 JPEG 处理。
+- 新本地曲目刚切换的 **前 1100 ms**（即使 UI 还没有收到 `OPENING` 状态）或处于 `OPENING` / `STOPPING` 时，不做新的封面读盘与 JPEG 处理。
 - 进入 `PLAYING` 后同时满足“本曲连续播放已观察到至少 **750 ms**”和“实际播放进度至少 **1000 ms**”，才恢复正常的封面逐帧加载。
 - 期间继续显示上一张封面；新封面完整解码后再原子切换，不会闪默认占位图。
 - 暂停、停止、未播放时仍允许正常加载封面；手机 AVRCP 封面不受此开关限制。
