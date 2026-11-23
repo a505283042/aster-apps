@@ -782,8 +782,10 @@ static void sync_media(void)
  * The cover is decorative; never make the first seconds of a new song wait
  * for SD/JPEG/PPA. Keep the previous art until the new decode completes.
  * Only local playback uses this gate: AVRCP remote cover is unchanged. */
-enum { COVER_AUDIO_START_GUARD_MS = 750, COVER_AUDIO_POSITION_MS = 1000 };
+enum { COVER_AUDIO_START_GUARD_MS = 750, COVER_AUDIO_POSITION_MS = 1000,
+       COVER_AUDIO_CHANGE_GUARD_MS = 1100 };
 static char cover_io_track[sizeof(current_file)];
+static uint32_t cover_changed_since;
 static uint32_t cover_playing_since;
 static bool cover_playing_seen;
 
@@ -796,7 +798,13 @@ static bool cover_io_allowed(uint32_t now)
         aster_snprintf(cover_io_track, sizeof(cover_io_track), "%s", track);
         cover_playing_seen = false;
         cover_playing_since = now;
+        cover_changed_since = now;
     }
+    /* A direct PLAY_FILE can be queued while the last UI snapshot still
+     * reads IDLE; a track-change gate must therefore hold even before
+     * the first OPENING notification arrives. */
+    if (*track && (uint32_t)(now - cover_changed_since) < COVER_AUDIO_CHANGE_GUARD_MS)
+        return false;
     if (player.state == ASTER_PLAYER_OPENING ||
         player.state == ASTER_PLAYER_STOPPING) {
         cover_playing_seen = false;
